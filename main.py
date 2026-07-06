@@ -27,7 +27,7 @@ from analisis_singularidades import analisis_completo
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
 estado_robot = {
     "robot_actual": "ABB_IRB_140",
