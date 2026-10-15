@@ -28,3 +28,6 @@ Thumbs.db
 # Temporal
 *.tmp
 *.bak
+
+# Environment
+.env

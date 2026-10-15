@@ -1,3 +1,8 @@
+import sys
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
@@ -24,9 +29,11 @@ from interpolacion import (
     calcular_num_pasos_por_velocidad
 )
 from analisis_singularidades import analisis_completo
+from vision_calibracion import vision_bp
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
+app.register_blueprint(vision_bp)
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='gevent')
 
 estado_robot = {
@@ -1190,18 +1197,19 @@ def main():
     print("  POST /api/cinematica/directa")
     print("  POST /api/rapid/parse")
     print("  POST /api/rapid/execute")
-    print("\n" + "="*60)
-    print("  Servidor: http://127.0.0.1:5000")
-    print("  WebSocket: ws://127.0.0.1:5000")
-    print("  Modo: DESARROLLO (Hot-Reload activado)")
+    host = os.environ.get('HOST', '127.0.0.1')
+    port = int(os.environ.get('PORT', 5050))
+    print(f"\n" + "="*60)
+    print(f"  Servidor: http://{host}:{port}")
+    print(f"  WebSocket: ws://{host}:{port}")
+    print("  Modo: DESARROLLO")
     print("="*60 + "\n")
     
     socketio.run(
         app, 
-        host='127.0.0.1', 
-        port=5000, 
-        debug=True, 
-        use_reloader=True,
+        host=host, 
+        port=port, 
+        debug=False,
         allow_unsafe_werkzeug=True
     )
 

@@ -1,0 +1,18 @@
+{
+  "valida": false,
+  "origen": null,
+  "esquinas_px": [],
+  "esquinas_mm": [],
+  "dimensiones_mm": {
+    "ancho": 220.0,
+    "alto": 140.0
+  },
+  "lados_px": null,
+  "escala": null,
+  "homografia_px_a_mm": null,
+  "homografia_mm_a_px": null,
+  "error_reproyeccion_px": null,
+  "error_reproyeccion_mm": null,
+  "validacion_distancia": null,
+  "fecha": null
+}

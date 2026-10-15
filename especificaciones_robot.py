@@ -64,9 +64,9 @@ ROBOTS = {
                 [1, 0, 0]
             ],
             "camara": {
-                "posicion": [2, 1.5, 2],
-                "fov": 50,
-                "min_distancia": 0.5,
+                "posicion": [1.2, 0.9, 1.2],
+                "fov": 45,
+                "min_distancia": 0.4,
                 "max_distancia": 10
             }
         },
