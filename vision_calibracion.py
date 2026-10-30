@@ -8,6 +8,24 @@ import cv2
 import numpy as np
 from flask import Blueprint, Response, jsonify, request
 
+from calibracion_coordenadas import (
+    ESTADO_SIN_CALIBRAR,
+    ESTADO_CONFIGURACION_INCOMPLETA,
+    ESTADO_CALCULANDO,
+    ESTADO_CALIBRACION_VIRTUAL_VALIDA,
+    ESTADO_CALIBRACION_FISICA_PENDIENTE,
+    ESTADO_CALIBRACION_FISICA_VALIDADA,
+    ESTADO_CALIBRACION_INVALIDA,
+    MODO_VIRTUAL,
+    MODO_FISICA,
+    obtener_geometria_defecto,
+    calcular_esquinas_marcador_mm,
+    validar_geometria_placa,
+    calcular_homografia_mesa,
+    transformar_punto_a_mesa,
+    transformar_punto_a_imagen,
+)
+
 try:
     import gevent
     def _async_sleep(segundos):
@@ -17,6 +35,13 @@ except ImportError:
         time.sleep(segundos)
 
 vision_bp = Blueprint("vision", __name__)
+
+@vision_bp.after_request
+def vision_bp_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS, PATCH"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization, X-Requested-With, Accept, Origin"
+    return response
 
 DICCIONARIOS_ARUCO = {
     "DICT_4X4_50": cv2.aruco.DICT_4X4_50,
@@ -151,7 +176,6 @@ def calcular_homografia_y_escala(esquinas_px, ancho_mm, alto_mm, origen="manual_
     except np.linalg.LinAlgError as exc:
         raise ValueError("La matriz de homografía calculada es singular (no invertible).") from exc
 
-    # Reproyección para verificar ajuste numérico de la transformación
     pts_px_h = np.hstack([pts_px, np.ones((4, 1), dtype=np.float64)])
     proy_mm_h = (H_px_a_mm @ pts_px_h.T).T
     proy_mm = proy_mm_h[:, :2] / proy_mm_h[:, 2:3]
@@ -230,6 +254,7 @@ def generar_frame_sintetico(
     alto=720,
     nombre_diccionario="DICT_4X4_50",
     ids_visibles=None,
+    geometria=None,
 ):
     if ids_visibles is None:
         ids_visibles = IDS_PLACA_ESPERADOS
@@ -237,57 +262,96 @@ def generar_frame_sintetico(
     aruco_dict = cv2.aruco.getPredefinedDictionary(DICCIONARIOS_ARUCO[nombre_diccionario])
     lienzo = np.full((alto, ancho, 3), (32, 38, 46), dtype=np.uint8)
 
-    margen_x = int(ancho * 0.14)
-    margen_y = int(alto * 0.14)
-    cv2.rectangle(
-        lienzo,
-        (margen_x, margen_y),
-        (ancho - margen_x, alto - margen_y),
-        (215, 218, 222),
-        -1,
-    )
-    cv2.rectangle(
-        lienzo,
-        (margen_x, margen_y),
-        (ancho - margen_x, alto - margen_y),
-        (90, 100, 110),
-        2,
-    )
+    if geometria and isinstance(geometria, dict) and "dimensiones_mm" in geometria:
+        ancho_mm = float(geometria["dimensiones_mm"]["ancho"])
+        alto_mm = float(geometria["dimensiones_mm"]["alto"])
+        escala = min((ancho * 0.72) / max(ancho_mm, 1.0), (alto * 0.72) / max(alto_mm, 1.0))
+        offset_x = (ancho - ancho_mm * escala) / 2.0
+        offset_y = (alto - alto_mm * escala) / 2.0
+        bx0, by0 = int(round(offset_x)), int(round(offset_y))
+        bx1, by1 = int(round(offset_x + ancho_mm * escala)), int(round(offset_y + alto_mm * escala))
+        cv2.rectangle(lienzo, (bx0, by0), (bx1, by1), (215, 218, 222), -1)
+        cv2.rectangle(lienzo, (bx0, by0), (bx1, by1), (90, 100, 110), 2)
 
-    lado_marker = min(ancho, alto) // 6
-    pad = int(lado_marker * 0.25)
+        for m in geometria.get("marcadores", []):
+            m_id = m.get("id")
+            cx_mm, cy_mm = m.get("centro_mm", [0.0, 0.0])
+            tam_mm = float(m.get("tamano_mm", 50.0))
+            lado_px = max(16, int(round(tam_mm * escala)))
+            cx_px = offset_x + cx_mm * escala
+            cy_px = offset_y + cy_mm * escala
+            x0 = int(round(cx_px - lado_px / 2.0))
+            y0 = int(round(cy_px - lado_px / 2.0))
 
-    posiciones_esquinas = {
-        0: (margen_x + pad, margen_y + pad),
-        1: (ancho - margen_x - pad - lado_marker, margen_y + pad),
-        2: (ancho - margen_x - pad - lado_marker, alto - margen_y - pad - lado_marker),
-        3: (margen_x + pad, alto - margen_y - pad - lado_marker),
-    }
+            if m_id not in ids_visibles:
+                cv2.rectangle(lienzo, (x0, y0), (x0 + lado_px, y0 + lado_px), (160, 165, 170), 2)
+                cv2.putText(
+                    lienzo,
+                    f"ID {m_id} OCULTO",
+                    (x0 + 8, y0 + lado_px // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (100, 105, 110),
+                    1,
+                    cv2.LINE_AA,
+                )
+                continue
 
-    for marker_id, (x0, y0) in posiciones_esquinas.items():
-        if marker_id not in ids_visibles:
-            cv2.rectangle(
-                lienzo,
-                (x0, y0),
-                (x0 + lado_marker, y0 + lado_marker),
-                (160, 165, 170),
-                2,
-            )
-            cv2.putText(
-                lienzo,
-                f"ID {marker_id} OCULTO",
-                (x0 + 10, y0 + lado_marker // 2),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                (100, 105, 110),
-                1,
-                cv2.LINE_AA,
-            )
-            continue
+            img_marker = cv2.aruco.generateImageMarker(aruco_dict, m_id, lado_px)
+            img_marker_bgr = cv2.cvtColor(img_marker, cv2.COLOR_GRAY2BGR)
+            lienzo[y0:y0 + lado_px, x0:x0 + lado_px] = img_marker_bgr
+    else:
+        margen_x = int(ancho * 0.14)
+        margen_y = int(alto * 0.14)
+        cv2.rectangle(
+            lienzo,
+            (margen_x, margen_y),
+            (ancho - margen_x, alto - margen_y),
+            (215, 218, 222),
+            -1,
+        )
+        cv2.rectangle(
+            lienzo,
+            (margen_x, margen_y),
+            (ancho - margen_x, alto - margen_y),
+            (90, 100, 110),
+            2,
+        )
 
-        img_marker = cv2.aruco.generateImageMarker(aruco_dict, marker_id, lado_marker)
-        img_marker_bgr = cv2.cvtColor(img_marker, cv2.COLOR_GRAY2BGR)
-        lienzo[y0:y0 + lado_marker, x0:x0 + lado_marker] = img_marker_bgr
+        lado_marker = min(ancho, alto) // 6
+        pad = int(lado_marker * 0.25)
+
+        posiciones_esquinas = {
+            0: (margen_x + pad, margen_y + pad),
+            1: (ancho - margen_x - pad - lado_marker, margen_y + pad),
+            2: (ancho - margen_x - pad - lado_marker, alto - margen_y - pad - lado_marker),
+            3: (margen_x + pad, alto - margen_y - pad - lado_marker),
+        }
+
+        for marker_id, (x0, y0) in posiciones_esquinas.items():
+            if marker_id not in ids_visibles:
+                cv2.rectangle(
+                    lienzo,
+                    (x0, y0),
+                    (x0 + lado_marker, y0 + lado_marker),
+                    (160, 165, 170),
+                    2,
+                )
+                cv2.putText(
+                    lienzo,
+                    f"ID {marker_id} OCULTO",
+                    (x0 + 10, y0 + lado_marker // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (100, 105, 110),
+                    1,
+                    cv2.LINE_AA,
+                )
+                continue
+
+            img_marker = cv2.aruco.generateImageMarker(aruco_dict, marker_id, lado_marker)
+            img_marker_bgr = cv2.cvtColor(img_marker, cv2.COLOR_GRAY2BGR)
+            lienzo[y0:y0 + lado_marker, x0:x0 + lado_marker] = img_marker_bgr
 
     ORIGEN_H = np.float32([
         [0, 0],
@@ -327,6 +391,7 @@ class GestorVision:
         self.resolucion = [1280, 720]
         self.autofocus = False
         self.marcadores_simulados = [0, 1, 2, 3]
+        self.geometria_placa = self._cargar_geometria_disco()
         self._calibracion = self._cargar_calibracion_disco()
 
         self._reiniciar_acumuladores_diagnostico()
@@ -334,39 +399,326 @@ class GestorVision:
         self._estado = self._crear_estado_base()
 
     def _crear_calibracion_vacia(self):
+        geo = getattr(self, "geometria_placa", None) or obtener_geometria_defecto()
+        dims = geo.get("dimensiones_mm", {"ancho": 400.0, "alto": 300.0})
         return {
+            "schema_version": "2.0",
             "valida": False,
+            "modo": MODO_VIRTUAL,
+            "estado": ESTADO_SIN_CALIBRAR,
+            "apto_para_robot": False,
+            "advertencia_seguridad": "Calibración virtual de referencia. NO válida para controlar el robot físico.",
+            "motivos_invalidez": ["Calibración no calculada."],
+            "id_configuracion": geo.get("id_configuracion", "mesa_trabajo_defecto"),
+            "unidades": geo.get("unidades", "mm"),
+            "origen_sistema": geo.get("origen_sistema", "esquina_superior_izquierda"),
+            "direccion_ejes": geo.get("direccion_ejes", {"eje_x": "hacia_la_derecha", "eje_y": "hacia_abajo"}),
+            "dimensiones_mm": dims,
+            "es_demostracion": geo.get("es_demostracion", True),
+            "marcadores": geo.get("marcadores", []),
+            "marcadores_esperados": [m["id"] for m in geo.get("marcadores", [])],
+            "resolucion_asociada": list(self.resolucion) if hasattr(self, "resolucion") else [1280, 720],
+            "es_simulacion": True,
+            "fecha_calculo": None,
+            "homografia_px_a_mm": None,
+            "homografia_mm_a_px": None,
+            "num_correspondencias": 0,
+            "error_ajuste": {"rms_mm": None, "max_mm": None, "rms_px": None},
+            "error_validacion_independiente": {"num_puntos_validacion": 0, "rms_mm": None, "max_mm": None, "estado": "sin_datos"},
+            "escala_estimada": None,
+            "zonas_preparacion": geo.get("zonas_preparacion", []),
             "origen": None,
             "esquinas_px": [],
             "esquinas_mm": [],
-            "dimensiones_mm": {"ancho": 220.0, "alto": 140.0},
             "lados_px": None,
             "escala": None,
-            "homografia_px_a_mm": None,
-            "homografia_mm_a_px": None,
             "error_reproyeccion_px": None,
             "error_reproyeccion_mm": None,
             "validacion_distancia": None,
             "fecha": None,
         }
 
+    def _cargar_geometria_disco(self):
+        if os.path.exists(ARCHIVO_CALIBRACION):
+            try:
+                with open(ARCHIVO_CALIBRACION, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "geometria_placa" in data:
+                    ok, _ = validar_geometria_placa(data["geometria_placa"])
+                    if ok:
+                        return data["geometria_placa"]
+            except Exception:
+                pass
+        return obtener_geometria_defecto()
+
     def _cargar_calibracion_disco(self):
         if os.path.exists(ARCHIVO_CALIBRACION):
             try:
                 with open(ARCHIVO_CALIBRACION, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if isinstance(data, dict) and "valida" in data:
-                    return data
+                if isinstance(data, dict):
+                    cal = data.get("calibracion", data)
+                    if isinstance(cal, dict) and "valida" in cal:
+                        base = self._crear_calibracion_vacia()
+                        base.update(cal)
+                        return base
             except Exception:
                 pass
         return self._crear_calibracion_vacia()
 
     def _guardar_calibracion_disco(self):
         try:
+            payload = {
+                "schema_version": "2.0",
+                "geometria_placa": self.geometria_placa,
+                "calibracion": self._calibracion,
+                "valida": self._calibracion.get("valida", False),
+                "fecha_actualizacion": datetime.now().isoformat(timespec="seconds"),
+            }
             with open(ARCHIVO_CALIBRACION, "w", encoding="utf-8") as f:
-                json.dump(self._calibracion, f, indent=2, ensure_ascii=False)
+                json.dump(payload, f, indent=2, ensure_ascii=False)
         except Exception:
             pass
+
+    def obtener_geometria_placa(self):
+        with self._lock:
+            return dict(self.geometria_placa)
+
+    def obtener_calibracion(self):
+        with self._lock:
+            return dict(self._calibracion)
+
+    def actualizar_geometria_placa(self, payload):
+        ok, errores = validar_geometria_placa(payload)
+        if not ok:
+            raise ValueError(f"Geometría de placa inválida: {'; '.join(errores)}")
+
+        with self._lock:
+            dims_prev = self.geometria_placa.get("dimensiones_mm", {})
+            dims_nuevas = payload.get("dimensiones_mm", {})
+            marcs_prev = self.geometria_placa.get("marcadores", [])
+            marcs_nuevos = payload.get("marcadores", [])
+
+            cambio_geometria = (
+                dims_prev.get("ancho") != dims_nuevas.get("ancho")
+                or dims_prev.get("alto") != dims_nuevas.get("alto")
+                or len(marcs_prev) != len(marcs_nuevos)
+                or any(
+                    m1.get("id") != m2.get("id")
+                    or m1.get("centro_mm") != m2.get("centro_mm")
+                    or m1.get("tamano_mm") != m2.get("tamano_mm")
+                    for m1, m2 in zip(marcs_prev, marcs_nuevos)
+                )
+            )
+
+            self.geometria_placa = dict(payload)
+            if cambio_geometria and self._calibracion.get("valida"):
+                self._calibracion["valida"] = False
+                self._calibracion["estado"] = ESTADO_CALIBRACION_INVALIDA
+                self._calibracion["motivos_invalidez"] = [
+                    "Geometría de la placa modificada; se requiere recalcular la calibración."
+                ]
+                self._calibracion["fecha_calculo"] = None
+
+            self._calibracion["dimensiones_mm"] = dict(dims_nuevas)
+            self._calibracion["marcadores"] = list(marcs_nuevos)
+            self._calibracion["marcadores_esperados"] = [m["id"] for m in marcs_nuevos]
+            self._estado["geometria_placa"] = dict(self.geometria_placa)
+            self._estado["calibracion_virtual"] = dict(self._calibracion)
+            self._estado["calibracion_homografia"] = dict(self._calibracion)
+            self._estado["modo_calibracion"] = self._calibracion.get("modo", MODO_VIRTUAL)
+            self._estado["estado_calibracion"] = self._calibracion.get("estado", ESTADO_SIN_CALIBRAR)
+            self._guardar_calibracion_disco()
+
+        return dict(self.geometria_placa)
+
+    def calcular_calibracion_mesa(self, payload=None):
+        payload = payload or {}
+        usar_aruco = bool(payload.get("usar_aruco", True))
+        val_marker_ids = payload.get("puntos_validacion_independiente_ids", [])
+        modo_solicitado = payload.get("modo", MODO_VIRTUAL)
+
+        with self._lock:
+            es_sim = self.fuente == "sintetico"
+            marcadores_actuales = list(self._estado.get("marcadores_detectados", []))
+            geo = dict(self.geometria_placa)
+            resolucion_actual = list(self._estado.get("resolucion", self.resolucion))
+
+        if es_sim and modo_solicitado == MODO_FISICA:
+            raise ValueError("No se permite declarar 'CALIBRACION_FISICA_VALIDADA' operando sobre una fuente sintética/simulada.")
+
+        modo_final = MODO_VIRTUAL if es_sim else modo_solicitado
+
+        if usar_aruco:
+            mapa_detectados = {m["id"]: m for m in marcadores_actuales}
+            mapa_geo = {m["id"]: m for m in geo.get("marcadores", [])}
+
+            faltantes = [m_id for m_id in mapa_geo if m_id not in mapa_detectados]
+            if len(mapa_detectados) < 3 and len(faltantes) > 0:
+                raise ValueError(
+                    f"Marcadores insuficientes para calcular la calibración. "
+                    f"Detectados: {list(mapa_detectados.keys())}, Faltantes esperados: {faltantes}."
+                )
+
+            pts_ajuste_px, pts_ajuste_mm = [], []
+            pts_val_px, pts_val_mm = [], []
+
+            for m_id, m_det in mapa_detectados.items():
+                if m_id not in mapa_geo:
+                    continue
+                m_geo = mapa_geo[m_id]
+                esq_mm = calcular_esquinas_marcador_mm(
+                    m_geo.get("centro_mm", [0, 0]),
+                    m_geo.get("tamano_mm", 50.0),
+                    m_geo.get("orientacion_deg", 0.0),
+                )
+                esq_px = m_det.get("esquinas_px", [])
+                if len(esq_px) != 4 or len(esq_mm) != 4:
+                    continue
+
+                if m_id in val_marker_ids:
+                    for p_px, p_mm in zip(esq_px, esq_mm):
+                        pts_val_px.append(p_px)
+                        pts_val_mm.append(p_mm)
+                else:
+                    for p_px, p_mm in zip(esq_px, esq_mm):
+                        pts_ajuste_px.append(p_px)
+                        pts_ajuste_mm.append(p_mm)
+
+            if len(pts_ajuste_px) < 4:
+                raise ValueError(
+                    f"Se requieren al menos 4 puntos para ajustar la homografía (obtenidos para ajuste: {len(pts_ajuste_px)})."
+                )
+
+            resultado_hom = calcular_homografia_mesa(
+                correspondencias_px=pts_ajuste_px,
+                correspondencias_mm=pts_ajuste_mm,
+                puntos_validacion_px=pts_val_px if pts_val_px else None,
+                puntos_validacion_mm=pts_val_mm if pts_val_mm else None,
+                modo=modo_final,
+            )
+            origen = "aruco_placa_virtual"
+        else:
+            corresp_px = payload.get("correspondencias_px") or payload.get("esquinas_px")
+            corresp_mm = payload.get("correspondencias_mm")
+            ancho_mm = payload.get("ancho_mm", geo.get("dimensiones_mm", {}).get("ancho", 400.0))
+            alto_mm = payload.get("alto_mm", geo.get("dimensiones_mm", {}).get("alto", 300.0))
+
+            if not corresp_mm and corresp_px and len(corresp_px) == 4:
+                corresp_mm = [
+                    [0.0, 0.0],
+                    [float(ancho_mm), 0.0],
+                    [float(ancho_mm), float(alto_mm)],
+                    [0.0, float(alto_mm)],
+                ]
+
+            resultado_hom = calcular_homografia_mesa(
+                correspondencias_px=corresp_px,
+                correspondencias_mm=corresp_mm,
+                modo=modo_final,
+            )
+            origen = "manual_4_esquinas"
+
+        cal = dict(self._crear_calibracion_vacia())
+        cal.update(resultado_hom)
+        cal["origen"] = origen
+        cal["resolucion_asociada"] = resolucion_actual
+        cal["resolucion_calibracion"] = resolucion_actual
+        cal["es_simulacion"] = es_sim
+        cal["dimensiones_mm"] = geo.get("dimensiones_mm", {"ancho": 400.0, "alto": 300.0})
+        cal["marcadores"] = geo.get("marcadores", [])
+        cal["marcadores_esperados"] = [m["id"] for m in geo.get("marcadores", [])]
+        cal["motivos_invalidez"] = []
+
+        cal["esquinas_px"] = pts_ajuste_px[:4] if usar_aruco else corresp_px
+        cal["esquinas_mm"] = pts_ajuste_mm[:4] if usar_aruco else corresp_mm
+        cal["error_reproyeccion_px"] = resultado_hom["error_ajuste"]["rms_px"]
+        cal["error_reproyeccion_mm"] = resultado_hom["error_ajuste"]["rms_mm"]
+        cal["escala"] = resultado_hom.get("escala_estimada")
+        cal["lados_px"] = {
+            "superior": 0.0, "derecho": 0.0, "inferior": 0.0, "izquierdo": 0.0,
+            "ancho_medio": round(cal["dimensiones_mm"]["ancho"] * (1.0 / max(cal["escala"]["mm_por_px_media"], 1e-6)), 1) if cal["escala"] else 0.0,
+            "alto_medio": round(cal["dimensiones_mm"]["alto"] * (1.0 / max(cal["escala"]["mm_por_px_media"], 1e-6)), 1) if cal["escala"] else 0.0,
+        }
+        cal["fecha"] = cal["fecha_calculo"]
+
+        with self._lock:
+            self._calibracion = cal
+            self._estado["calibracion_homografia"] = dict(cal)
+            self._guardar_calibracion_disco()
+
+        return dict(cal)
+
+    def transformar_px_a_mm(self, payload):
+        with self._lock:
+            cal = dict(self._calibracion)
+            dims = dict(self.geometria_placa.get("dimensiones_mm", {}))
+
+        if not cal.get("valida"):
+            raise ValueError("No existe una calibración activa válida.")
+
+        if "u" in payload and "v" in payload:
+            return transformar_punto_a_mesa(payload["u"], payload["v"], cal, dims)
+
+        puntos = payload.get("puntos_px")
+        if not isinstance(puntos, list) or len(puntos) == 0:
+            raise ValueError("Se requiere 'u' y 'v', o una lista 'puntos_px'.")
+
+        resultados = [transformar_punto_a_mesa(p[0], p[1], cal, dims) for p in puntos]
+        return {
+            "puntos_transformados": resultados,
+            "calibracion_modo": cal.get("modo"),
+            "unidades": "mm",
+        }
+
+    def transformar_mm_a_px(self, payload):
+        with self._lock:
+            cal = dict(self._calibracion)
+            res = list(self.resolucion)
+
+        if not cal.get("valida"):
+            raise ValueError("No existe una calibración activa válida.")
+
+        if "x" in payload and "y" in payload:
+            return transformar_punto_a_imagen(payload["x"], payload["y"], cal, res)
+
+        puntos = payload.get("puntos_mm")
+        if not isinstance(puntos, list) or len(puntos) == 0:
+            raise ValueError("Se requiere 'x' e 'y', o una lista 'puntos_mm'.")
+
+        resultados = [transformar_punto_a_imagen(p[0], p[1], cal, res) for p in puntos]
+        return {
+            "puntos_transformados": resultados,
+            "calibracion_modo": cal.get("modo"),
+        }
+
+    def invalidar_calibracion(self, motivo="Invalidación manual solicitada."):
+        with self._lock:
+            self._calibracion["valida"] = False
+            self._calibracion["estado"] = ESTADO_CALIBRACION_INVALIDA
+            self._calibracion["motivos_invalidez"] = [motivo]
+            self._calibracion["fecha_calculo"] = None
+            self._estado["calibracion_virtual"] = dict(self._calibracion)
+            self._estado["calibracion_homografia"] = dict(self._calibracion)
+            self._estado["modo_calibracion"] = self._calibracion.get("modo", MODO_VIRTUAL)
+            self._estado["estado_calibracion"] = self._calibracion.get("estado", ESTADO_SIN_CALIBRAR)
+            self._guardar_calibracion_disco()
+            return dict(self._calibracion)
+
+    def resetear_calibracion_virtual(self):
+        with self._lock:
+            self.geometria_placa = obtener_geometria_defecto()
+            self._calibracion = self._crear_calibracion_vacia()
+            self._estado["geometria_placa"] = dict(self.geometria_placa)
+            self._estado["calibracion_virtual"] = dict(self._calibracion)
+            self._estado["calibracion_homografia"] = dict(self._calibracion)
+            self._estado["modo_calibracion"] = self._calibracion.get("modo", MODO_VIRTUAL)
+            self._estado["estado_calibracion"] = self._calibracion.get("estado", ESTADO_SIN_CALIBRAR)
+            self._guardar_calibracion_disco()
+            return {
+                "geometria_placa": dict(self.geometria_placa),
+                "calibracion": dict(self._calibracion),
+            }
 
     def calcular_calibracion_cuatro_esquinas(self, payload):
         usar_aruco = bool(payload.get("usar_aruco", False))
@@ -385,7 +737,6 @@ class GestorVision:
                 raise ValueError(
                     f"Para auto-seleccionar con ArUco deben verse los 4 marcadores. Faltan IDs: {faltan}"
                 )
-            # Esquinas exteriores del casco: E0 de ID0, E1 de ID1, E2 de ID2, E3 de ID3
             esquinas_px = [
                 mapa[0][0],
                 mapa[1][1],
@@ -398,8 +749,26 @@ class GestorVision:
             origen = "manual_4_esquinas"
 
         cal = calcular_homografia_y_escala(esquinas_px, ancho_mm, alto_mm, origen=origen)
+        cal["schema_version"] = "2.0"
         cal["resolucion_calibracion"] = resolucion_actual
         cal["es_simulacion"] = es_sim
+        cal["modo"] = MODO_VIRTUAL if es_sim else MODO_FISICA
+        cal["estado"] = ESTADO_CALIBRACION_VIRTUAL_VALIDA if es_sim else ESTADO_CALIBRACION_FISICA_PENDIENTE
+        cal["advertencia_seguridad"] = "Calibración virtual en entorno simulado. NO válida para control físico del robot ABB IRB 140."
+        cal["motivos_invalidez"] = []
+        cal["error_ajuste"] = {
+            "rms_mm": cal.get("error_reproyeccion_mm", 0.0),
+            "max_mm": cal.get("error_reproyeccion_mm", 0.0),
+            "rms_px": cal.get("error_reproyeccion_px", 0.0),
+        }
+        cal["error_validacion_independiente"] = {
+            "num_puntos_validacion": 0,
+            "rms_mm": None,
+            "max_mm": None,
+            "estado": "pendiente_validacion_independiente",
+        }
+        cal["escala_estimada"] = cal.get("escala")
+        cal["fecha_calculo"] = cal.get("fecha")
 
         with self._lock:
             self._calibracion = cal
@@ -635,7 +1004,11 @@ class GestorVision:
             "error_camara": None,
             "ultima_actualizacion": None,
             "diagnostico": self._construir_diagnostico_vacio(),
+            "geometria_placa": dict(self.geometria_placa),
+            "calibracion_virtual": dict(self._calibracion),
             "calibracion_homografia": dict(self._calibracion),
+            "modo_calibracion": self._calibracion.get("modo", MODO_VIRTUAL),
+            "estado_calibracion": self._calibracion.get("estado", ESTADO_SIN_CALIBRAR),
         }
 
     def iniciar(self):
@@ -793,11 +1166,14 @@ class GestorVision:
                     self._cerrar_camara_segura(cap_actual)
                     cap_actual = None
                     cfg_cam_activa = None
+                with self._lock:
+                    geo_actual = dict(self.geometria_placa)
                 frame = generar_frame_sintetico(
                     ancho=resolucion[0],
                     alto=resolucion[1],
                     nombre_diccionario=diccionario,
                     ids_visibles=simulados,
+                    geometria=geo_actual,
                 )
                 error_camara = None
             else:
@@ -857,21 +1233,6 @@ class GestorVision:
                 tiempo_ms = 0.0
                 num_rechazados = 0
                 error_camara = str(e)
-
-            if fuente == "sintetico":
-                cv2.rectangle(
-                    frame_anotado, (0, 0), (frame_anotado.shape[1], 36), (15, 23, 42), -1
-                )
-                cv2.putText(
-                    frame_anotado,
-                    "SIMULACION SINTETICA - NO APTO PARA CALIBRACION NI MOVIMIENTO FISICO",
-                    (14, 24),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.58,
-                    (0, 200, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
 
             t_actual = time.perf_counter()
             dt = max(t_actual - t_prev, 1e-4)
@@ -979,7 +1340,11 @@ class GestorVision:
                 "error_camara": error_camara,
                 "ultima_actualizacion": datetime.now().isoformat(timespec="seconds"),
                 "diagnostico": diagnostico,
+                "geometria_placa": dict(self.geometria_placa),
+                "calibracion_virtual": dict(self._calibracion),
                 "calibracion_homografia": dict(self._calibracion),
+                "modo_calibracion": self._calibracion.get("modo", MODO_VIRTUAL),
+                "estado_calibracion": self._calibracion.get("estado", ESTADO_SIN_CALIBRAR),
             }
 
     def obtener_estado(self):
@@ -1092,6 +1457,42 @@ def obtener_frame_individual():
     return resp
 
 
+@vision_bp.route("/api/vision/capturar", methods=["POST"])
+def capturar_frame():
+    if not gestor_vision.activa:
+        gestor_vision.iniciar()
+    jpeg = gestor_vision.obtener_jpeg()
+    if jpeg is None:
+        return jsonify({"success": False, "error": "No hay fotograma disponible de la camara"}), 503
+
+    workspace_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python_workspace", "capturas")
+    os.makedirs(workspace_dir, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"captura_{ts}.jpg"
+    filepath = os.path.join(workspace_dir, filename)
+    with open(filepath, "wb") as f:
+        f.write(jpeg)
+
+    return jsonify({
+        "success": True,
+        "filename": filename,
+        "rel_path": f"capturas/{filename}"
+    })
+
+
+@vision_bp.route("/api/vision/iniciar", methods=["POST"])
+def endpoint_iniciar_vision():
+    gestor_vision.iniciar()
+    return jsonify({"success": True, "vision": gestor_vision.obtener_estado()})
+
+
+@vision_bp.route("/api/vision/detener", methods=["POST"])
+def endpoint_detener_vision():
+    gestor_vision.detener()
+    return jsonify({"success": True, "vision": gestor_vision.obtener_estado()})
+
+
 @vision_bp.route("/api/vision/stream", methods=["GET"])
 def stream_video():
     if not gestor_vision.activa:
@@ -1099,17 +1500,264 @@ def stream_video():
 
     def generar():
         ultimo_enviado = None
-        while gestor_vision.activa:
-            jpeg = gestor_vision.obtener_jpeg()
-            if jpeg is not None and jpeg is not ultimo_enviado:
-                ultimo_enviado = jpeg
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
-                )
-            _async_sleep(0.015)
+        try:
+            while gestor_vision.activa:
+                jpeg = gestor_vision.obtener_jpeg()
+                if jpeg is not None and jpeg is not ultimo_enviado:
+                    ultimo_enviado = jpeg
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
+                    )
+                _async_sleep(0.03)
+        except (GeneratorExit, ConnectionResetError, BrokenPipeError, Exception):
+            pass
 
-    return Response(
+    resp = Response(
         generar(),
         mimetype="multipart/x-mixed-replace; boundary=frame",
     )
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    return resp
+
+
+@vision_bp.route("/api/vision/calibracion/geometria", methods=["GET", "POST"])
+def endpoint_geometria_calibracion():
+    if request.method == "GET":
+        return jsonify({
+            "success": True,
+            "geometria": gestor_vision.obtener_geometria_placa(),
+        })
+    try:
+        data = request.get_json(silent=True) or {}
+        geo = gestor_vision.actualizar_geometria_placa(data)
+        return jsonify({
+            "success": True,
+            "geometria": geo,
+            "vision": gestor_vision.obtener_estado(),
+        })
+    except ValueError as ve:
+        return jsonify({"success": False, "error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Error actualizando geometría: {str(e)}"}), 500
+
+
+@vision_bp.route("/api/vision/calibracion/calcular", methods=["POST"])
+def endpoint_calcular_calibracion_virtual():
+    try:
+        data = request.get_json(silent=True) or {}
+        cal = gestor_vision.calcular_calibracion_mesa(data)
+        return jsonify({
+            "success": True,
+            "calibracion": cal,
+            "vision": gestor_vision.obtener_estado(),
+        })
+    except ValueError as ve:
+        return jsonify({"success": False, "error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Error en cálculo de calibración: {str(e)}"}), 500
+
+
+@vision_bp.route("/api/vision/calibracion/transformar/px-a-mm", methods=["POST"])
+def endpoint_transformar_px_a_mm():
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "error": "Se requiere un cuerpo JSON con coordenadas de imagen."}), 400
+        res = gestor_vision.transformar_px_a_mm(data)
+        return jsonify({
+            "success": True,
+            "resultado": res,
+        })
+    except ValueError as ve:
+        return jsonify({"success": False, "error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Error en transformación px->mm: {str(e)}"}), 500
+
+
+@vision_bp.route("/api/vision/calibracion/transformar/mm-a-px", methods=["POST"])
+def endpoint_transformar_mm_a_px():
+    try:
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"success": False, "error": "Se requiere un cuerpo JSON con coordenadas de mesa en mm."}), 400
+        res = gestor_vision.transformar_mm_a_px(data)
+        return jsonify({
+            "success": True,
+            "resultado": res,
+        })
+    except ValueError as ve:
+        return jsonify({"success": False, "error": str(ve)}), 400
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Error en transformación mm->px: {str(e)}"}), 500
+
+
+@vision_bp.route("/api/vision/calibracion/guardar", methods=["POST"])
+def endpoint_guardar_calibracion():
+    try:
+        gestor_vision._guardar_calibracion_disco()
+        return jsonify({
+            "success": True,
+            "mensaje": "Configuración y calibración guardadas exitosamente en disco.",
+            "calibracion": gestor_vision.obtener_calibracion(),
+            "geometria": gestor_vision.obtener_geometria_placa(),
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Error guardando calibración: {str(e)}"}), 500
+
+
+@vision_bp.route("/api/vision/calibracion/invalidar", methods=["POST"])
+def endpoint_invalidar_calibracion():
+    try:
+        data = request.get_json(silent=True) or {}
+        motivo = data.get("motivo", "Invalidación manual solicitada.")
+        cal = gestor_vision.invalidar_calibracion(motivo)
+        return jsonify({
+            "success": True,
+            "calibracion": cal,
+            "vision": gestor_vision.obtener_estado(),
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Error invalidando calibración: {str(e)}"}), 500
+
+
+@vision_bp.route("/api/vision/calibracion/reset", methods=["POST"])
+def endpoint_reset_calibracion_virtual():
+    try:
+        res = gestor_vision.resetear_calibracion_virtual()
+        return jsonify({
+            "success": True,
+            "resultado": res,
+            "vision": gestor_vision.obtener_estado(),
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Error al reiniciar calibración: {str(e)}"}), 500
+
+
+_ULTIMA_IMAGEN_PROCESADA = None
+_socketio_instance = None
+
+def register_vision_socketio(sio):
+    global _socketio_instance
+    _socketio_instance = sio
+
+@vision_bp.route("/api/vision/procesada", methods=["GET", "POST"])
+def endpoint_imagen_procesada():
+    global _ULTIMA_IMAGEN_PROCESADA
+    capturas_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python_workspace", "capturas")
+
+    if request.method == "POST":
+        if "file" in request.files:
+            _ULTIMA_IMAGEN_PROCESADA = request.files["file"].read()
+        elif request.data:
+            _ULTIMA_IMAGEN_PROCESADA = request.data
+        if _ULTIMA_IMAGEN_PROCESADA:
+            os.makedirs(capturas_dir, exist_ok=True)
+            with open(os.path.join(capturas_dir, "ultima_deteccion.jpg"), "wb") as f:
+                f.write(_ULTIMA_IMAGEN_PROCESADA)
+            if _socketio_instance is not None:
+                piezas_cnt = request.args.get("piezas", None)
+                _socketio_instance.emit("vision_procesada", {
+                    "timestamp": time.time(),
+                    "piezas_detectadas": int(piezas_cnt) if piezas_cnt is not None else None
+                })
+        return jsonify({"success": True})
+
+    det_path = os.path.join(capturas_dir, "ultima_deteccion.jpg")
+    if os.path.exists(det_path):
+        try:
+            with open(det_path, "rb") as f:
+                _ULTIMA_IMAGEN_PROCESADA = f.read()
+        except OSError:
+            pass
+
+    if _ULTIMA_IMAGEN_PROCESADA is None:
+        frame = gestor_vision.obtener_jpeg()
+        if frame:
+            _ULTIMA_IMAGEN_PROCESADA = frame
+        else:
+            return Response(status=204)
+
+    resp = Response(_ULTIMA_IMAGEN_PROCESADA, mimetype="image/jpeg")
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
+
+
+@vision_bp.route("/api/vision/detectar", methods=["POST"])
+def endpoint_detectar_objetos():
+    if not gestor_vision.activa:
+        gestor_vision.iniciar()
+    jpeg = gestor_vision.obtener_jpeg()
+    if jpeg is None:
+        time.sleep(0.3)
+        jpeg = gestor_vision.obtener_jpeg()
+    if jpeg is None:
+        return jsonify({"success": False, "error": "No hay fotograma de camara disponible"}), 503
+
+    arr = np.frombuffer(jpeg, dtype=np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        return jsonify({"success": False, "error": "Fallo al decodificar imagen"}), 500
+
+    alto, ancho = frame.shape[:2]
+    gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    desenfoque = cv2.GaussianBlur(gris, (5, 5), 0)
+    _, mascara = cv2.threshold(desenfoque, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    mascara = cv2.morphologyEx(mascara, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mascara = cv2.morphologyEx(mascara, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    contornos, _ = cv2.findContours(mascara, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    piezas = []
+    anotada = frame.copy()
+    idx = 1
+
+    for c in contornos:
+        area = cv2.contourArea(c)
+        if area < 800 or area > 250000:
+            continue
+        M = cv2.moments(c)
+        if M["m00"] == 0:
+            continue
+        cx = int(M["m10"] / M["m00"])
+        cy = int(M["m01"] / M["m00"])
+        x, y, w, h = cv2.boundingRect(c)
+
+        x_mm = round(350.0 + (cy * 0.5), 2)
+        y_mm = round(-250.0 + (cx * 0.5), 2)
+
+        cv2.rectangle(anotada, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.circle(anotada, (cx, cy), 5, (0, 0, 255), -1)
+        cv2.putText(anotada, f"#{idx} ({x_mm}, {y_mm})mm", (x, max(20, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
+
+        piezas.append({
+            "id": idx,
+            "centro_px": [cx, cy],
+            "posicion_mm": [x_mm, y_mm],
+            "area_px": int(area),
+            "bbox": [x, y, w, h]
+        })
+        idx += 1
+
+    ok, buf = cv2.imencode(".jpg", anotada, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    if ok:
+        global _ULTIMA_IMAGEN_PROCESADA
+        _ULTIMA_IMAGEN_PROCESADA = buf.tobytes()
+        capturas_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python_workspace", "capturas")
+        os.makedirs(capturas_dir, exist_ok=True)
+        with open(os.path.join(capturas_dir, "ultima_deteccion.jpg"), "wb") as f:
+            f.write(_ULTIMA_IMAGEN_PROCESADA)
+
+        if _socketio_instance is not None:
+            _socketio_instance.emit("vision_procesada", {
+                "timestamp": time.time(),
+                "piezas_detectadas": len(piezas),
+                "piezas": piezas
+            })
+
+    return jsonify({"success": True, "piezas_detectadas": len(piezas), "piezas": piezas})
+
+

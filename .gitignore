@@ -1,4 +1,3 @@
-# Python
 venv/
 __pycache__/
 *.pyc
@@ -10,24 +9,22 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
 
-# IDEs
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS
 .DS_Store
 Thumbs.db
 
-# Logs
 *.log
-
-# Temporal
 *.tmp
 *.bak
-
-# Environment
 .env
+
+python_workspace/users/
+python_workspace/capturas/*.jpg
+python_workspace/capturas/*.png

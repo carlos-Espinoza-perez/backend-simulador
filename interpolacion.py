@@ -28,28 +28,27 @@ def interpolar_lineal_cartesiano(
     quat_fin: List[float],
     num_pasos: int = 20
 ) -> List[Dict[str, Any]]:
-    
     pos_inicio = np.array(pos_inicio)
     pos_fin = np.array(pos_fin)
-
     trayectoria = []
 
-    rot_inicio = Rotation.from_quat(quat_inicio)
-    rot_fin = Rotation.from_quat(quat_fin)
+    q_ini_scipy = [quat_inicio[1], quat_inicio[2], quat_inicio[3], quat_inicio[0]]
+    q_fin_scipy = [quat_fin[1], quat_fin[2], quat_fin[3], quat_fin[0]]
+
+    rot_inicio = Rotation.from_quat(q_ini_scipy)
+    rot_fin = Rotation.from_quat(q_fin_scipy)
     
     tiempos = np.linspace(0, 1, num_pasos + 1)
     slerp = Slerp([0, 1], Rotation.concatenate([rot_inicio, rot_fin]))
     
     for t in tiempos:
-
         pos_intermedia = pos_inicio + t * (pos_fin - pos_inicio)
-
-        rot_intermedia = slerp([t])[0]
-        quat_intermedia = rot_intermedia.as_quat()
+        q_scipy = slerp([t])[0].as_quat()
+        q_rapid = [float(q_scipy[3]), float(q_scipy[0]), float(q_scipy[1]), float(q_scipy[2])]
         
         trayectoria.append({
             'position': pos_intermedia.tolist(),
-            'quaternion': quat_intermedia.tolist()
+            'quaternion': q_rapid
         })
     
     return trayectoria
@@ -93,8 +92,10 @@ def interpolar_circular(
 
     trayectoria = []
 
-    rot_inicio = Rotation.from_quat(quat_inicio)
-    rot_fin = Rotation.from_quat(quat_fin)
+    q_ini_scipy = [quat_inicio[1], quat_inicio[2], quat_inicio[3], quat_inicio[0]]
+    q_fin_scipy = [quat_fin[1], quat_fin[2], quat_fin[3], quat_fin[0]]
+    rot_inicio = Rotation.from_quat(q_ini_scipy)
+    rot_fin = Rotation.from_quat(q_fin_scipy)
     slerp = Slerp([0, 1], Rotation.concatenate([rot_inicio, rot_fin]))
     
     for i in range(num_pasos + 1):
@@ -102,13 +103,12 @@ def interpolar_circular(
         angulo = angulo_total * t
 
         pos_intermedia = centro + rotar_vector(v1, normal, angulo)
-
-        rot_intermedia = slerp([t])[0]
-        quat_intermedia = rot_intermedia.as_quat()
+        q_scipy = slerp([t])[0].as_quat()
+        q_rapid = [float(q_scipy[3]), float(q_scipy[0]), float(q_scipy[1]), float(q_scipy[2])]
         
         trayectoria.append({
             'position': pos_intermedia.tolist(),
-            'quaternion': quat_intermedia.tolist()
+            'quaternion': q_rapid
         })
     
     return trayectoria
@@ -165,30 +165,28 @@ def rotar_vector(v: np.ndarray, eje: np.ndarray, angulo: float) -> np.ndarray:
             eje * np.dot(eje, v) * (1 - cos_ang))
 
 def calcular_num_pasos_por_velocidad(velocidad: str, distancia: float = None) -> int:
-    
     import re
     match = re.search(r'v(\d+)', velocidad.lower())
     
     if match:
         vel_mm_s = float(match.group(1))
     elif 'max' in velocidad.lower():
-        vel_mm_s = 2000.0  # Asumimos vMAX en este simulador
+        vel_mm_s = 2000.0
     else:
-        vel_mm_s = 1000.0  # Default fallback
+        vel_mm_s = 1000.0
 
     if vel_mm_s <= 0:
         vel_mm_s = 1000.0
 
-    tiempo_por_paso = 0.05 
+    tiempo_por_paso = 0.04
     
-    if distancia is not None and distancia > 0:
-
-        tiempo_total_segundos = distancia / vel_mm_s
-        pasos = tiempo_total_segundos / tiempo_por_paso
+    if distancia is not None:
+        if distancia < 1.0:
+            return 2
+        tiempo_total = distancia / vel_mm_s
+        pasos = tiempo_total / tiempo_por_paso
     else:
-
-        distancia_media = 300.0
-        tiempo_total_segundos = distancia_media / vel_mm_s
-        pasos = tiempo_total_segundos / tiempo_por_paso
+        tiempo_total = 300.0 / vel_mm_s
+        pasos = tiempo_total / tiempo_por_paso
 
     return min(max(int(round(pasos)), 2), 500)

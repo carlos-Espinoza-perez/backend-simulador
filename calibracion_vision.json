@@ -1,18 +1,408 @@
 {
-  "valida": false,
-  "origen": null,
-  "esquinas_px": [],
-  "esquinas_mm": [],
-  "dimensiones_mm": {
-    "ancho": 220.0,
-    "alto": 140.0
+  "schema_version": "2.0",
+  "geometria_placa": {
+    "dimensiones_mm": {
+      "alto": 350.0,
+      "ancho": 500.0
+    },
+    "direccion_ejes": {
+      "eje_x": "hacia_la_derecha",
+      "eje_y": "hacia_abajo"
+    },
+    "es_demostracion": true,
+    "id_configuracion": "mesa_trabajo_defecto",
+    "marcadores": [
+      {
+        "centro_mm": [
+          40.0,
+          40.0
+        ],
+        "id": 0,
+        "orientacion_deg": 0.0,
+        "tamano_mm": 50.0
+      },
+      {
+        "centro_mm": [
+          360.0,
+          40.0
+        ],
+        "id": 1,
+        "orientacion_deg": 0.0,
+        "tamano_mm": 50.0
+      },
+      {
+        "centro_mm": [
+          360.0,
+          260.0
+        ],
+        "id": 2,
+        "orientacion_deg": 0.0,
+        "tamano_mm": 50.0
+      },
+      {
+        "centro_mm": [
+          40.0,
+          260.0
+        ],
+        "id": 3,
+        "orientacion_deg": 0.0,
+        "tamano_mm": 50.0
+      }
+    ],
+    "origen_sistema": "esquina_superior_izquierda",
+    "unidades": "mm",
+    "zonas_preparacion": [
+      {
+        "color": "#38bdf8",
+        "id": "clasificacion",
+        "nombre": "Área de Clasificación",
+        "poligono_mm": [
+          [
+            80.0,
+            70.0
+          ],
+          [
+            320.0,
+            70.0
+          ],
+          [
+            320.0,
+            230.0
+          ],
+          [
+            80.0,
+            230.0
+          ]
+        ]
+      },
+      {
+        "color": "#4ade80",
+        "id": "pet",
+        "nombre": "Depósito PET",
+        "poligono_mm": [
+          [
+            15.0,
+            90.0
+          ],
+          [
+            65.0,
+            90.0
+          ],
+          [
+            65.0,
+            210.0
+          ],
+          [
+            15.0,
+            210.0
+          ]
+        ]
+      },
+      {
+        "color": "#facc15",
+        "id": "aluminio",
+        "nombre": "Depósito Aluminio",
+        "poligono_mm": [
+          [
+            335.0,
+            90.0
+          ],
+          [
+            385.0,
+            90.0
+          ],
+          [
+            385.0,
+            210.0
+          ],
+          [
+            335.0,
+            210.0
+          ]
+        ]
+      }
+    ]
   },
-  "lados_px": null,
-  "escala": null,
-  "homografia_px_a_mm": null,
-  "homografia_mm_a_px": null,
-  "error_reproyeccion_px": null,
-  "error_reproyeccion_mm": null,
-  "validacion_distancia": null,
-  "fecha": null
+  "calibracion": {
+    "schema_version": "2.0",
+    "valida": true,
+    "modo": "virtual",
+    "estado": "CALIBRACION_VIRTUAL_VALIDA",
+    "apto_para_robot": false,
+    "advertencia_seguridad": "Calibración plana de referencia; no válida directamente para mover el robot físico sin calibración wobj/TCP.",
+    "motivos_invalidez": [],
+    "id_configuracion": "mesa_trabajo_defecto",
+    "unidades": "mm",
+    "origen_sistema": "esquina_superior_izquierda",
+    "direccion_ejes": {
+      "eje_x": "hacia_la_derecha",
+      "eje_y": "hacia_abajo"
+    },
+    "dimensiones_mm": {
+      "alto": 350.0,
+      "ancho": 500.0
+    },
+    "es_demostracion": true,
+    "marcadores": [
+      {
+        "centro_mm": [
+          40.0,
+          40.0
+        ],
+        "id": 0,
+        "orientacion_deg": 0.0,
+        "tamano_mm": 50.0
+      },
+      {
+        "centro_mm": [
+          360.0,
+          40.0
+        ],
+        "id": 1,
+        "orientacion_deg": 0.0,
+        "tamano_mm": 50.0
+      },
+      {
+        "centro_mm": [
+          360.0,
+          260.0
+        ],
+        "id": 2,
+        "orientacion_deg": 0.0,
+        "tamano_mm": 50.0
+      },
+      {
+        "centro_mm": [
+          40.0,
+          260.0
+        ],
+        "id": 3,
+        "orientacion_deg": 0.0,
+        "tamano_mm": 50.0
+      }
+    ],
+    "marcadores_esperados": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "resolucion_asociada": [
+      1280,
+      720
+    ],
+    "es_simulacion": true,
+    "fecha_calculo": "2026-10-16T18:59:24",
+    "homografia_px_a_mm": [
+      [
+        0.681843659,
+        0.015853185,
+        -197.252351531
+      ],
+      [
+        0.006224739,
+        0.704226294,
+        -82.464098058
+      ],
+      [
+        3.6562e-05,
+        6.5479e-05,
+        1.0
+      ]
+    ],
+    "homografia_mm_a_px": [
+      [
+        1.47816087,
+        -0.05992627,
+        286.628941778
+      ],
+      [
+        -0.019246588,
+        1.435312499,
+        114.565315927
+      ],
+      [
+        -5.2784e-05,
+        -9.1791e-05,
+        1.0
+      ]
+    ],
+    "num_correspondencias": 16,
+    "error_ajuste": {
+      "rms_mm": 0.1246,
+      "max_mm": 0.1765,
+      "rms_px": 0.1882
+    },
+    "error_validacion_independiente": {
+      "num_puntos_validacion": 0,
+      "rms_mm": null,
+      "max_mm": null,
+      "estado": "pendiente_validacion_independiente"
+    },
+    "escala_estimada": {
+      "mm_por_px_x": 0.6461,
+      "mm_por_px_y": 0.6649,
+      "mm_por_px_media": 0.6555,
+      "px_por_mm_media": 1.526
+    },
+    "zonas_preparacion": [
+      {
+        "color": "#38bdf8",
+        "id": "clasificacion",
+        "nombre": "Área de Clasificación",
+        "poligono_mm": [
+          [
+            80.0,
+            70.0
+          ],
+          [
+            320.0,
+            70.0
+          ],
+          [
+            320.0,
+            230.0
+          ],
+          [
+            80.0,
+            230.0
+          ]
+        ]
+      },
+      {
+        "color": "#4ade80",
+        "id": "pet",
+        "nombre": "Depósito PET",
+        "poligono_mm": [
+          [
+            15.0,
+            90.0
+          ],
+          [
+            65.0,
+            90.0
+          ],
+          [
+            65.0,
+            210.0
+          ],
+          [
+            15.0,
+            210.0
+          ]
+        ]
+      },
+      {
+        "color": "#facc15",
+        "id": "aluminio",
+        "nombre": "Depósito Aluminio",
+        "poligono_mm": [
+          [
+            335.0,
+            90.0
+          ],
+          [
+            385.0,
+            90.0
+          ],
+          [
+            385.0,
+            210.0
+          ],
+          [
+            335.0,
+            210.0
+          ]
+        ]
+      }
+    ],
+    "origen": "aruco_placa_virtual",
+    "esquinas_px": [
+      [
+        308.57,
+        136.28
+      ],
+      [
+        383.54,
+        135.56
+      ],
+      [
+        382.44,
+        208.43
+      ],
+      [
+        307.01,
+        208.73
+      ]
+    ],
+    "esquinas_mm": [
+      [
+        15.0,
+        15.0
+      ],
+      [
+        65.0,
+        15.0
+      ],
+      [
+        65.0,
+        65.0
+      ],
+      [
+        15.0,
+        65.0
+      ]
+    ],
+    "lados_px": {
+      "superior": 0.0,
+      "derecho": 0.0,
+      "inferior": 0.0,
+      "izquierdo": 0.0,
+      "ancho_medio": 762.8,
+      "alto_medio": 533.9
+    },
+    "escala": {
+      "mm_por_px_x": 0.6461,
+      "mm_por_px_y": 0.6649,
+      "mm_por_px_media": 0.6555,
+      "px_por_mm_media": 1.526
+    },
+    "error_reproyeccion_px": 0.1882,
+    "error_reproyeccion_mm": 0.1246,
+    "validacion_distancia": {
+      "puntos_px": [
+        [
+          320.0,
+          180.0
+        ],
+        [
+          960.0,
+          180.0
+        ]
+      ],
+      "puntos_mm": [
+        [
+          23.25,
+          45.23
+        ],
+        [
+          439.56,
+          48.02
+        ]
+      ],
+      "distancia_px": 640.0,
+      "distancia_medida_mm": 416.32,
+      "distancia_real_mm": 300.0,
+      "error_absoluto_mm": 116.32,
+      "error_porcentual": 38.77,
+      "fecha": "2026-10-16T19:24:18"
+    },
+    "fecha": "2026-10-16T18:59:24",
+    "resolucion_calibracion": [
+      1280,
+      720
+    ]
+  },
+  "valida": true,
+  "fecha_actualizacion": "2026-10-16T19:24:35"
 }

@@ -1,0 +1,32 @@
+{
+  "active_profile": "virtual_local",
+  "profiles": [
+    {
+      "id": "virtual_local",
+      "name": "ABB RobotStudio - Controlador Virtual (127.0.0.1)",
+      "host": "127.0.0.1",
+      "port": 5001,
+      "timeout": 3.0,
+      "mode": "SIMULATED",
+      "description": "Conexion TCP directa al controlador virtual IRB 140 en RobotStudio (puerto 5001)"
+    },
+    {
+      "id": "irc5_service_port",
+      "name": "ABB IRC5 Físico - Puerto de Servicio (X2)",
+      "host": "192.168.125.1",
+      "port": 5001,
+      "timeout": 4.0,
+      "mode": "CONNECTED_PHYSICAL",
+      "description": "Conexion directa por cable Ethernet al puerto de servicio X2 del IRC5"
+    },
+    {
+      "id": "irc5_lan_cell",
+      "name": "ABB IRC5 Físico - Red LAN de Celda",
+      "host": "0.0.0.0",
+      "port": 5001,
+      "timeout": 3.0,
+      "mode": "CONNECTED_PHYSICAL",
+      "description": "Configurar la IP real asignada al controlador en el laboratorio"
+    }
+  ]
+}

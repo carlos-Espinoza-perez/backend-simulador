@@ -97,9 +97,9 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
     else:
 
         if s[-1] > 1e-10:
-            cond_number = s[0] / s[-1]
+            cond_number = float(s[0] / s[-1])
         else:
-            cond_number = np.inf
+            cond_number = 1e6
 
     singularidades = []
 
@@ -149,14 +149,28 @@ def analizar_singularidades(joints_deg: List[float], tabla_dh: List[List[float]]
         estado = "cerca_singular"
     else:
         estado = "normal"
-    
+
+    cond_clean = float(cond_number)
+    if np.isinf(cond_clean) or np.isnan(cond_clean) or cond_clean > 1e6:
+        cond_clean = 1e6
+
+    det_clean = float(det_J)
+    if np.isinf(det_clean) or np.isnan(det_clean):
+        det_clean = 0.0
+
+    manip_clean = float(abs(det_J))
+    if np.isinf(manip_clean) or np.isnan(manip_clean):
+        manip_clean = 0.0
+
+    s_clean = [float(v) if not (np.isinf(v) or np.isnan(v)) else 0.0 for v in s]
+
     return {
         "estado": estado,
-        "determinante": float(det_J),
-        "numero_condicion": float(cond_number),
-        "valores_singulares": s.tolist(),
+        "determinante": det_clean,
+        "numero_condicion": cond_clean,
+        "valores_singulares": s_clean,
         "singularidades": singularidades,
-        "manipulabilidad": float(abs(det_J)),  # Índice de Yoshikawa
+        "manipulabilidad": manip_clean,
         "jacobiano": J.tolist()
     }
 

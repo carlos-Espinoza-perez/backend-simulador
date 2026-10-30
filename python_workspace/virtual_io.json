@@ -1,0 +1,79 @@
+[
+  {
+    "name": "di_pieza_presente",
+    "type": "DI",
+    "value": 1,
+    "description": "Sensor de pieza en mesa de trabajo",
+    "is_virtual": true
+  },
+  {
+    "name": "di_ciclo_inicio",
+    "type": "DI",
+    "value": 0,
+    "description": "Pulsador de inicio de ciclo",
+    "is_virtual": true
+  },
+  {
+    "name": "di_parada_celda",
+    "type": "DI",
+    "value": 0,
+    "description": "Entrada de paro de ciclo",
+    "is_virtual": true
+  },
+  {
+    "name": "di_robot_listo",
+    "type": "DI",
+    "value": 1,
+    "description": "Confirmacion de robot en posicion",
+    "is_virtual": true
+  },
+  {
+    "name": "di_pinza_abierta",
+    "type": "DI",
+    "value": 1,
+    "description": "Fin de carrera pinza abierta",
+    "is_virtual": true
+  },
+  {
+    "name": "di_pinza_cerrada",
+    "type": "DI",
+    "value": 0,
+    "description": "Fin de carrera pinza cerrada",
+    "is_virtual": true
+  },
+  {
+    "name": "do_valvula_aire",
+    "type": "DO",
+    "value": 1,
+    "description": "Valvula de alimentacion neumatica",
+    "is_virtual": true
+  },
+  {
+    "name": "do_pinza_actuar",
+    "type": "DO",
+    "value": 1,
+    "description": "Cilindro actuador de mordaza",
+    "is_virtual": true
+  },
+  {
+    "name": "do_indicador_verde",
+    "type": "DO",
+    "value": 1,
+    "description": "Luz indicadora de ejecucion",
+    "is_virtual": true
+  },
+  {
+    "name": "do_indicador_rojo",
+    "type": "DO",
+    "value": 0,
+    "description": "Luz indicadora de alarma",
+    "is_virtual": true
+  },
+  {
+    "name": "do_indicador_amarillo",
+    "type": "DO",
+    "value": 0,
+    "description": "Luz indicadora de espera",
+    "is_virtual": true
+  }
+]

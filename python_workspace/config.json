@@ -1,0 +1,6 @@
+{
+  "connection_profile": "virtual",
+  "controller_ip": "127.0.0.1",
+  "controller_port": 5001,
+  "timeout_sec": 3.0
+}
