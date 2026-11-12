@@ -249,12 +249,37 @@ def transformar_puntos_px_a_mm(puntos_px, H_px_a_mm):
     return [[round(float(p[0]), 2), round(float(p[1]), 2)] for p in proy]
 
 
+def _dibujar_piezas_sinteticas(lienzo, bx0, by0, bx1, by1):
+    w_placa = max(bx1 - bx0, 100)
+    h_placa = max(by1 - by0, 100)
+
+    cx_pet = int(round(bx0 + w_placa * 0.30))
+    cy_pet = int(round(by0 + h_placa * 0.40))
+    r_pet = max(16, int(round(min(w_placa, h_placa) * 0.055)))
+    cv2.circle(lienzo, (cx_pet, cy_pet), r_pet, (215, 115, 25), -1, cv2.LINE_AA)
+    cv2.circle(lienzo, (cx_pet, cy_pet), max(6, r_pet // 2), (235, 145, 55), 2, cv2.LINE_AA)
+
+    cx_alu = int(round(bx0 + w_placa * 0.44))
+    cy_alu = int(round(by0 + h_placa * 0.58))
+    r_alu = max(18, int(round(min(w_placa, h_placa) * 0.062)))
+    cv2.circle(lienzo, (cx_alu, cy_alu), r_alu, (132, 136, 140), -1, cv2.LINE_AA)
+    cv2.circle(lienzo, (cx_alu, cy_alu), max(7, int(r_alu * 0.55)), (168, 172, 176), 3, cv2.LINE_AA)
+
+    cx_car = float(bx0 + w_placa * 0.56)
+    cy_car = float(by0 + h_placa * 0.43)
+    w_car = max(32.0, w_placa * 0.11)
+    h_car = max(22.0, h_placa * 0.075)
+    box_car = cv2.boxPoints(((cx_car, cy_car), (w_car, h_car), 24.0))
+    cv2.fillConvexPoly(lienzo, np.int32(box_car), (55, 118, 178), cv2.LINE_AA)
+
+
 def generar_frame_sintetico(
     ancho=1280,
     alto=720,
     nombre_diccionario="DICT_4X4_50",
     ids_visibles=None,
     geometria=None,
+    incluir_piezas=False,
 ):
     if ids_visibles is None:
         ids_visibles = IDS_PLACA_ESPERADOS
@@ -272,6 +297,9 @@ def generar_frame_sintetico(
         bx1, by1 = int(round(offset_x + ancho_mm * escala)), int(round(offset_y + alto_mm * escala))
         cv2.rectangle(lienzo, (bx0, by0), (bx1, by1), (215, 218, 222), -1)
         cv2.rectangle(lienzo, (bx0, by0), (bx1, by1), (90, 100, 110), 2)
+
+        if incluir_piezas:
+            _dibujar_piezas_sinteticas(lienzo, bx0, by0, bx1, by1)
 
         for m in geometria.get("marcadores", []):
             m_id = m.get("id")
@@ -317,6 +345,9 @@ def generar_frame_sintetico(
             (90, 100, 110),
             2,
         )
+
+        if incluir_piezas:
+            _dibujar_piezas_sinteticas(lienzo, margen_x, margen_y, ancho - margen_x, alto - margen_y)
 
         lado_marker = min(ancho, alto) // 6
         pad = int(lado_marker * 0.25)
@@ -385,7 +416,7 @@ class GestorVision:
         self._stream_id = 0
 
         self.activa = False
-        self.fuente = "camara_fisica"
+        self.fuente = "sintetico"
         self.indice_camara = 0
         self.diccionario = "DICT_4X4_50"
         self.resolucion = [1280, 720]
@@ -395,7 +426,18 @@ class GestorVision:
         self._calibracion = self._cargar_calibracion_disco()
 
         self._reiniciar_acumuladores_diagnostico()
-        self._ultimo_jpeg = None
+        frame_base = generar_frame_sintetico(
+            ancho=self.resolucion[0],
+            alto=self.resolucion[1],
+            nombre_diccionario=self.diccionario,
+            ids_visibles=list(self.marcadores_simulados),
+            geometria=self.geometria_placa,
+            incluir_piezas=True,
+        )
+        ok_init, buf_init = cv2.imencode(".jpg", frame_base, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        bytes_base = buf_init.tobytes() if ok_init else None
+        self._ultimo_jpeg = bytes_base
+        self._ultimo_jpeg_crudo = bytes_base
         self._estado = self._crear_estado_base()
 
     def _crear_calibracion_vacia(self):
@@ -1014,13 +1056,28 @@ class GestorVision:
     def iniciar(self):
         with self._lock:
             self.activa = True
-            frame_espera = self._generar_frame_mensaje(
-                f"Iniciando {'modo sintetico' if self.fuente == 'sintetico' else f'camara fisica #{self.indice_camara}'}...",
-                color=(255, 200, 0),
-            )
-            ok, buf = cv2.imencode(".jpg", frame_espera, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
-            if ok:
-                self._ultimo_jpeg = buf.tobytes()
+            if self.fuente == "sintetico":
+                frame_init = generar_frame_sintetico(
+                    ancho=self.resolucion[0],
+                    alto=self.resolucion[1],
+                    nombre_diccionario=self.diccionario,
+                    ids_visibles=list(self.marcadores_simulados),
+                    geometria=dict(self.geometria_placa),
+                    incluir_piezas=True,
+                )
+                ok, buf = cv2.imencode(".jpg", frame_init, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+                if ok:
+                    bytes_init = buf.tobytes()
+                    self._ultimo_jpeg = bytes_init
+                    self._ultimo_jpeg_crudo = bytes_init
+            else:
+                frame_espera = self._generar_frame_mensaje(
+                    f"Iniciando camara fisica #{self.indice_camara}...",
+                    color=(255, 200, 0),
+                )
+                ok, buf = cv2.imencode(".jpg", frame_espera, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                if ok:
+                    self._ultimo_jpeg = buf.tobytes()
 
         self._asegurar_hilo()
         self._evento_despertar.set()
@@ -1174,6 +1231,7 @@ class GestorVision:
                     nombre_diccionario=diccionario,
                     ids_visibles=simulados,
                     geometria=geo_actual,
+                    incluir_piezas=True,
                 )
                 error_camara = None
             else:
@@ -1197,13 +1255,21 @@ class GestorVision:
                         )
 
                 if cap_actual is None:
-                    frame = self._generar_frame_mensaje(
-                        error_camara or f"Cámara #{indice} no disponible",
-                        resolucion,
-                        color=(80, 80, 255),
+                    with self._lock:
+                        geo_actual = dict(self.geometria_placa)
+                    frame = generar_frame_sintetico(
+                        ancho=resolucion[0],
+                        alto=resolucion[1],
+                        nombre_diccionario=diccionario,
+                        ids_visibles=simulados,
+                        geometria=geo_actual,
+                        incluir_piezas=True,
+                    )
+                    error_camara = (
+                        f"Cámara física #{indice} no detectada. Operando en modo sintético de respaldo."
                     )
                     self._actualizar_frame_y_estado(frame, [], 0.0, error_camara, 0.0, 0, contar_diagnostico=False)
-                    time.sleep(0.3)
+                    time.sleep(0.05)
                     continue
 
                 try:
@@ -1250,6 +1316,7 @@ class GestorVision:
                 tiempo_ms,
                 num_rechazados,
                 contar_diagnostico=True,
+                frame_crudo=frame,
             )
             if fuente == "sintetico":
                 time.sleep(0.03)
@@ -1278,6 +1345,7 @@ class GestorVision:
         tiempo_ms=0.0,
         num_rechazados=0,
         contar_diagnostico=True,
+        frame_crudo=None,
     ):
         h, w = frame_anotado.shape[:2]
         if w > 1280:
@@ -1287,6 +1355,12 @@ class GestorVision:
 
         ok, buffer = cv2.imencode(".jpg", frame_stream, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
         jpeg_bytes = buffer.tobytes() if ok else None
+
+        jpeg_crudo_bytes = None
+        if frame_crudo is not None:
+            ok_c, buf_c = cv2.imencode(".jpg", frame_crudo, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            if ok_c:
+                jpeg_crudo_bytes = buf_c.tobytes()
 
         ids_detectados = [m["id"] for m in marcadores]
         ids_esperados_visibles = [i for i in IDS_PLACA_ESPERADOS if i in ids_detectados]
@@ -1307,6 +1381,8 @@ class GestorVision:
             es_sim = self.fuente == "sintetico"
             if jpeg_bytes is not None:
                 self._ultimo_jpeg = jpeg_bytes
+            if jpeg_crudo_bytes is not None:
+                self._ultimo_jpeg_crudo = jpeg_crudo_bytes
 
             if contar_diagnostico and not error_camara:
                 diagnostico = self._calcular_diagnostico(
@@ -1351,8 +1427,10 @@ class GestorVision:
         with self._lock:
             return dict(self._estado)
 
-    def obtener_jpeg(self):
+    def obtener_jpeg(self, crudo=False):
         with self._lock:
+            if crudo and self._ultimo_jpeg_crudo is not None:
+                return self._ultimo_jpeg_crudo
             return self._ultimo_jpeg
 
 
@@ -1449,7 +1527,8 @@ def configurar_vision():
 def obtener_frame_individual():
     if not gestor_vision.activa:
         gestor_vision.iniciar()
-    jpeg = gestor_vision.obtener_jpeg()
+    crudo = request.args.get("crudo", "0") in ("1", "true", "True")
+    jpeg = gestor_vision.obtener_jpeg(crudo=crudo)
     if jpeg is None:
         return Response(status=204)
     resp = Response(jpeg, mimetype="image/jpeg")
@@ -1658,10 +1737,21 @@ def endpoint_imagen_procesada():
                 f.write(_ULTIMA_IMAGEN_PROCESADA)
             if _socketio_instance is not None:
                 piezas_cnt = request.args.get("piezas", None)
-                _socketio_instance.emit("vision_procesada", {
+                piezas_meta = None
+                meta_path = os.path.join(capturas_dir, "ultima_deteccion.json")
+                if os.path.isfile(meta_path):
+                    try:
+                        with open(meta_path, "r", encoding="utf-8") as mf:
+                            piezas_meta = json.load(mf)
+                    except Exception:
+                        piezas_meta = None
+                payload_ws = {
                     "timestamp": time.time(),
-                    "piezas_detectadas": int(piezas_cnt) if piezas_cnt is not None else None
-                })
+                    "piezas_detectadas": int(piezas_cnt) if piezas_cnt is not None else (len(piezas_meta) if piezas_meta else 0),
+                }
+                if piezas_meta is not None:
+                    payload_ws["piezas"] = piezas_meta
+                _socketio_instance.emit("vision_procesada", payload_ws)
         return jsonify({"success": True})
 
     det_path = os.path.join(capturas_dir, "ultima_deteccion.jpg")
@@ -1688,10 +1778,10 @@ def endpoint_imagen_procesada():
 def endpoint_detectar_objetos():
     if not gestor_vision.activa:
         gestor_vision.iniciar()
-    jpeg = gestor_vision.obtener_jpeg()
+    jpeg = gestor_vision.obtener_jpeg(crudo=True)
     if jpeg is None:
         time.sleep(0.3)
-        jpeg = gestor_vision.obtener_jpeg()
+        jpeg = gestor_vision.obtener_jpeg(crudo=True)
     if jpeg is None:
         return jsonify({"success": False, "error": "No hay fotograma de camara disponible"}), 503
 
@@ -1700,47 +1790,30 @@ def endpoint_detectar_objetos():
     if frame is None:
         return jsonify({"success": False, "error": "Fallo al decodificar imagen"}), 500
 
-    alto, ancho = frame.shape[:2]
-    gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    desenfoque = cv2.GaussianBlur(gris, (5, 5), 0)
-    _, mascara = cv2.threshold(desenfoque, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    req_data = request.get_json(silent=True) or {}
+    criterio = req_data.get("criterio", "proximidad")
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    mascara = cv2.morphologyEx(mascara, cv2.MORPH_CLOSE, kernel, iterations=2)
-    mascara = cv2.morphologyEx(mascara, cv2.MORPH_OPEN, kernel, iterations=1)
+    py_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "python_workspace", "python")
+    import sys
+    if py_dir not in sys.path:
+        sys.path.insert(0, py_dir)
 
-    contornos, _ = cv2.findContours(mascara, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    from detector import detectar_piezas, dibujar_detecciones
+
+    cal = gestor_vision.obtener_calibracion()
+    cal["geometria_placa"] = gestor_vision.obtener_geometria_placa()
+
+    piezas_raw = detectar_piezas(frame, calibracion=cal, criterio=criterio)
+    anotada = dibujar_detecciones(frame, piezas_raw, calibracion=cal)
 
     piezas = []
-    anotada = frame.copy()
-    idx = 1
-
-    for c in contornos:
-        area = cv2.contourArea(c)
-        if area < 800 or area > 250000:
-            continue
-        M = cv2.moments(c)
-        if M["m00"] == 0:
-            continue
-        cx = int(M["m10"] / M["m00"])
-        cy = int(M["m01"] / M["m00"])
-        x, y, w, h = cv2.boundingRect(c)
-
-        x_mm = round(350.0 + (cy * 0.5), 2)
-        y_mm = round(-250.0 + (cx * 0.5), 2)
-
-        cv2.rectangle(anotada, (x, y), (x + w, y + h), (0, 255, 0), 2)
-        cv2.circle(anotada, (cx, cy), 5, (0, 0, 255), -1)
-        cv2.putText(anotada, f"#{idx} ({x_mm}, {y_mm})mm", (x, max(20, y - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1, cv2.LINE_AA)
-
-        piezas.append({
-            "id": idx,
-            "centro_px": [cx, cy],
-            "posicion_mm": [x_mm, y_mm],
-            "area_px": int(area),
-            "bbox": [x, y, w, h]
-        })
-        idx += 1
+    for p in piezas_raw:
+        item = {}
+        for k, v in p.items():
+            if k in ("crop", "mascara") or isinstance(v, np.ndarray):
+                continue
+            item[k] = list(v) if isinstance(v, tuple) else v
+        piezas.append(item)
 
     ok, buf = cv2.imencode(".jpg", anotada, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if ok:
@@ -1750,6 +1823,8 @@ def endpoint_detectar_objetos():
         os.makedirs(capturas_dir, exist_ok=True)
         with open(os.path.join(capturas_dir, "ultima_deteccion.jpg"), "wb") as f:
             f.write(_ULTIMA_IMAGEN_PROCESADA)
+        with open(os.path.join(capturas_dir, "ultima_deteccion.json"), "w", encoding="utf-8") as mf:
+            json.dump(piezas, mf, ensure_ascii=False, indent=2)
 
         if _socketio_instance is not None:
             _socketio_instance.emit("vision_procesada", {

@@ -26,5 +26,4 @@ Thumbs.db
 .env
 
 python_workspace/users/
-python_workspace/capturas/*.jpg
-python_workspace/capturas/*.png
+python_workspace/capturas/

@@ -21,23 +21,16 @@ class WorkspaceManager:
 
         main_py = os.path.join(python_dir, "main.py")
         if not os.path.exists(main_py):
-            with open(main_py, "w", encoding="utf-8") as f:
-                f.write(
-                    'import sys\n'
-                    'from abb_irc5 import RobotClient\n\n'
-                    'def main():\n'
-                    '    print("Iniciando script Python...")\n'
-                    '    print(f"Python version: {sys.version.split()[0]}")\n'
-                    '    robot = RobotClient(host="127.0.0.1", port=5001)\n'
-                    '    res = robot.connect(timeout=2.0)\n'
-                    '    print("Conexion IRC5:", res)\n'
-                    '    if res.get("success"):\n'
-                    '        print("Ping:", robot.ping())\n'
-                    '        print("Estado:", robot.get_status())\n'
-                    '        robot.disconnect()\n\n'
-                    'if __name__ == "__main__":\n'
-                    '    main()\n'
-                )
+            base_main = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "python_workspace", "python", "main.py")
+            if os.path.exists(base_main):
+                shutil.copy2(base_main, main_py)
+            else:
+                with open(main_py, "w", encoding="utf-8") as f:
+                    f.write(
+                        'from main_celda import ejecutar_ciclo_clasificacion\n\n'
+                        'if __name__ == "__main__":\n'
+                        '    ejecutar_ciclo_clasificacion()\n'
+                    )
 
         rapid_mod = os.path.join(rapid_dir, "MainModule.mod")
         if not os.path.exists(rapid_mod):

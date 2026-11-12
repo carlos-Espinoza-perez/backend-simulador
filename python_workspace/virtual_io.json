@@ -7,6 +7,20 @@
     "is_virtual": true
   },
   {
+    "name": "di_sensor_inductivo",
+    "type": "DI",
+    "value": 0,
+    "description": "Sensor inductivo para metales (Aluminio)",
+    "is_virtual": true
+  },
+  {
+    "name": "di_sensor_capacitivo",
+    "type": "DI",
+    "value": 0,
+    "description": "Sensor capacitivo para no metales / dielectricos (PET)",
+    "is_virtual": true
+  },
+  {
     "name": "di_ciclo_inicio",
     "type": "DI",
     "value": 0,

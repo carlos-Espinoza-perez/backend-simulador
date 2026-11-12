@@ -304,6 +304,8 @@ MODULE IRC5_TcpServer
     LOCAL PROC HandleGetDI(string body, num msg_id)
         IF Contains(body, "di_pieza_presente") OR Contains(body, "di_robot_listo") OR Contains(body, "di_pinza_abierta") OR Contains(body, "di1") THEN
             SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":1,""error"":null}\0A");
+        ELSEIF Contains(body, "di_sensor_inductivo") OR Contains(body, "di_sensor_capacitivo") THEN
+            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":0,""error"":null}\0A");
         ELSEIF Contains(body, "di_ciclo_inicio") OR Contains(body, "di_parada_celda") OR Contains(body, "di_pinza_cerrada") THEN
             SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":0,""error"":null}\0A");
         ELSE

@@ -192,46 +192,46 @@
       720
     ],
     "es_simulacion": true,
-    "fecha_calculo": "2026-10-16T18:59:24",
+    "fecha_calculo": "2026-11-11T19:34:16",
     "homografia_px_a_mm": [
       [
-        0.681843659,
-        0.015853185,
-        -197.252351531
+        0.744865988,
+        0.017313333,
+        -211.319645897
       ],
       [
-        0.006224739,
-        0.704226294,
-        -82.464098058
+        0.006766739,
+        0.770613379,
+        -90.279592405
       ],
       [
-        3.6562e-05,
-        6.5479e-05,
+        3.6182e-05,
+        6.4615e-05,
         1.0
       ]
     ],
     "homografia_mm_a_px": [
       [
-        1.47816087,
-        -0.05992627,
-        286.628941778
+        1.352962199,
+        -0.053961461,
+        281.03587419
       ],
       [
-        -0.019246588,
-        1.435312499,
-        114.565315927
+        -0.017482989,
+        1.311255695,
+        114.685130692
       ],
       [
-        -5.2784e-05,
-        -9.1791e-05,
+        -4.7823e-05,
+        -8.2774e-05,
         1.0
       ]
     ],
     "num_correspondencias": 16,
     "error_ajuste": {
-      "rms_mm": 0.1246,
-      "max_mm": 0.1765,
-      "rms_px": 0.1882
+      "rms_mm": 0.1393,
+      "max_mm": 0.2116,
+      "rms_px": 0.1919
     },
     "error_validacion_independiente": {
       "num_puntos_validacion": 0,
@@ -240,10 +240,10 @@
       "estado": "pendiente_validacion_independiente"
     },
     "escala_estimada": {
-      "mm_por_px_x": 0.6461,
-      "mm_por_px_y": 0.6649,
-      "mm_por_px_media": 0.6555,
-      "px_por_mm_media": 1.526
+      "mm_por_px_x": 0.7086,
+      "mm_por_px_y": 0.7307,
+      "mm_por_px_media": 0.7196,
+      "px_por_mm_media": 1.39
     },
     "zonas_preparacion": [
       {
@@ -319,20 +319,20 @@
     "origen": "aruco_placa_virtual",
     "esquinas_px": [
       [
-        308.57,
-        136.28
+        301.34,
+        134.52
       ],
       [
-        383.54,
-        135.56
+        369.59,
+        133.81
       ],
       [
-        382.44,
-        208.43
+        368.45,
+        200.43
       ],
       [
-        307.01,
-        208.73
+        299.68,
+        200.63
       ]
     ],
     "esquinas_mm": [
@@ -358,51 +358,24 @@
       "derecho": 0.0,
       "inferior": 0.0,
       "izquierdo": 0.0,
-      "ancho_medio": 762.8,
-      "alto_medio": 533.9
+      "ancho_medio": 694.8,
+      "alto_medio": 486.4
     },
     "escala": {
-      "mm_por_px_x": 0.6461,
-      "mm_por_px_y": 0.6649,
-      "mm_por_px_media": 0.6555,
-      "px_por_mm_media": 1.526
+      "mm_por_px_x": 0.7086,
+      "mm_por_px_y": 0.7307,
+      "mm_por_px_media": 0.7196,
+      "px_por_mm_media": 1.39
     },
-    "error_reproyeccion_px": 0.1882,
-    "error_reproyeccion_mm": 0.1246,
-    "validacion_distancia": {
-      "puntos_px": [
-        [
-          320.0,
-          180.0
-        ],
-        [
-          960.0,
-          180.0
-        ]
-      ],
-      "puntos_mm": [
-        [
-          23.25,
-          45.23
-        ],
-        [
-          439.56,
-          48.02
-        ]
-      ],
-      "distancia_px": 640.0,
-      "distancia_medida_mm": 416.32,
-      "distancia_real_mm": 300.0,
-      "error_absoluto_mm": 116.32,
-      "error_porcentual": 38.77,
-      "fecha": "2026-10-16T19:24:18"
-    },
-    "fecha": "2026-10-16T18:59:24",
+    "error_reproyeccion_px": 0.1919,
+    "error_reproyeccion_mm": 0.1393,
+    "validacion_distancia": null,
+    "fecha": "2026-11-11T19:34:16",
     "resolucion_calibracion": [
       1280,
       720
     ]
   },
   "valida": true,
-  "fecha_actualizacion": "2026-10-16T19:24:35"
+  "fecha_actualizacion": "2026-11-11T19:34:16"
 }

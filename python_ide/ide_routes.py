@@ -101,13 +101,18 @@ class ClientSession:
         shared_robot_client = client
 
     def _seed_workspace(self):
-        if os.path.exists(self.workspace_root):
-            return
         os.makedirs(self.workspace_root, exist_ok=True)
-        for name in os.listdir(BASE_WORKSPACE):
-            src = os.path.join(BASE_WORKSPACE, name)
-            if os.path.isfile(src) and (name.endswith(".py") or name.endswith(".json")):
-                shutil.copy2(src, os.path.join(self.workspace_root, name))
+        for root, dirs, files in os.walk(BASE_WORKSPACE):
+            dirs[:] = [d for d in dirs if not d.startswith(".") and d != "__pycache__" and d != "users"]
+            rel = os.path.relpath(root, BASE_WORKSPACE)
+            target_dir = self.workspace_root if rel == "." else os.path.join(self.workspace_root, rel)
+            os.makedirs(target_dir, exist_ok=True)
+            for f in files:
+                if f.startswith("."):
+                    continue
+                target_file = os.path.join(target_dir, f)
+                if not os.path.exists(target_file):
+                    shutil.copy2(os.path.join(root, f), target_file)
 
     def log_traffic(self, direction: str, payload: dict, latency_ms: float = None):
         entry = {

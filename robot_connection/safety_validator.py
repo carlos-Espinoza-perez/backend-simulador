@@ -36,6 +36,8 @@ class SafetyValidator:
     
     DEFAULT_ALLOWED_DI: Set[str] = {
         "di_pieza_presente",
+        "di_sensor_inductivo",
+        "di_sensor_capacitivo",
         "di_ciclo_inicio",
         "di_parada_celda",
         "di_robot_listo",
