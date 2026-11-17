@@ -90,7 +90,9 @@ class IRC5Protocol:
         "GET_VARIABLE",
         "GET_JOINTS",
         "MOVE_JOINTS",
-        "MOVE_PRESET"
+        "MOVE_PRESET",
+        "STOP",
+        "DISCONNECT"
     }
 
     @staticmethod

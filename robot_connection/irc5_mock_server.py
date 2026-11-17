@@ -98,6 +98,8 @@ class IRC5MockServer:
                 for msg in messages:
                     response_bytes = self._process_command(msg)
                     client_sock.sendall(response_bytes)
+                    if msg.cmd == "DISCONNECT":
+                        raise ConnectionAbortedError("cierre solicitado por cliente")
 
             except (socket.timeout, BlockingIOError):
                 continue
@@ -124,9 +126,12 @@ class IRC5MockServer:
                 data={
                     "exec_state": "running",
                     "mode": "virtual_simulated",
+                    "run_mode": "continuous",
                     "controller": "ABB_IRC5_MOCK",
+                    "speed_override": 100,
                     "speed_ratio": 100,
                     "cycle": "continuous",
+                    "cycle_counter": 0,
                     "robot_state": "IDLE",
                     "joints": list(self.current_joints),
                     "timestamp": time.time()
@@ -200,5 +205,11 @@ class IRC5MockServer:
             if name in self.variables:
                 return IRC5Protocol.build_response(msg_id, "OK", data=self.variables[name])
             return IRC5Protocol.build_response(msg_id, "ERROR", error=f"Variable '{name}' no encontrada")
+
+        elif cmd == "STOP":
+            return IRC5Protocol.build_response(msg_id, "OK", data="STOPPED")
+
+        elif cmd == "DISCONNECT":
+            return IRC5Protocol.build_response(msg_id, "OK", data="BYE")
 
         return IRC5Protocol.build_response(msg_id, "ERROR", error=f"Comando desconocido: {cmd}")

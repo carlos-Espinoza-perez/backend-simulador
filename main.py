@@ -35,7 +35,8 @@ from python_ide.ide_routes import (
     ide_bp,
     register_ide_socketio,
     register_joint_sync_callback,
-    get_shared_robot_client
+    get_shared_robot_client,
+    log_robot_event
 )
 
 app = Flask(__name__)
@@ -115,38 +116,86 @@ def validar_limites(angulos):
             return False, f"Eje {i+1}: {angulo}° fuera de límites [{min_lim}°, {max_lim}°]"
     return True, "OK"
 
+import collections
+import queue as _queue
+import re as _re
+from robot_connection.safety_validator import SafetyValidationError
+
+# Cola FIFO: cada target final de un Move del programa se ejecuta en orden en el robot fisico
+# (antes era un unico slot "el ultimo gana" y se perdian puntos mientras MoveAbsJ estaba en curso).
 _irc5_cond = threading.Condition()
-_irc5_q = None
-_irc5_spd = 100.0
+_irc5_fifo = collections.deque(maxlen=500)
+# Eventos generados por el hilo worker (hilo real del SO); se reemiten desde un greenlet de socketio
+_irc5_eventos = _queue.Queue()
+
+def _speed_mm_s(speed_token, default=100.0):
+    """'v100' -> 100.0 ; 'vmax' u otros -> default."""
+    if isinstance(speed_token, (int, float)):
+        return float(speed_token)
+    m = _re.match(r"^\s*v(\d+(?:\.\d+)?)\s*$", str(speed_token or ""), _re.IGNORECASE)
+    return float(m.group(1)) if m else default
 
 def _irc5_worker():
-    global _irc5_q
     while True:
         with _irc5_cond:
-            while _irc5_q is None:
+            while not _irc5_fifo:
                 _irc5_cond.wait()
-            q = list(_irc5_q)
-            spd = _irc5_spd
-            _irc5_q = None
+            q, spd = _irc5_fifo.popleft()
         cli = get_shared_robot_client()
-        if cli is not None and cli.is_connected() and len(q) == 6:
-            try:
-                cli.move_joints(q, speed=spd, physical_confirmed=True)
-            except Exception as err:
-                print(f"[IRC5] {err}")
+        if cli is None or not cli.is_connected() or len(q) != 6:
+            continue
+        try:
+            res = cli.move_joints(q, speed=spd, physical_confirmed=True)
+            _irc5_eventos.put(("IN", {"cmd": "MOVE_JOINTS", "joints": q, "speed": spd, **res}, res.get("latency_ms")))
+        except Exception as err:
+            print(f"[IRC5] {err}")
+            _irc5_eventos.put(("IN", {"cmd": "MOVE_JOINTS", "joints": q, "speed": spd, "success": False, "error": str(err)}, None))
+
+def _irc5_eventos_bridge():
+    while True:
+        try:
+            direction, payload, lat = _irc5_eventos.get_nowait()
+        except _queue.Empty:
+            socketio.sleep(0.1)
+            continue
+        log_robot_event(direction, payload, latency_ms=lat)
+        if not payload.get("success", True):
+            socketio.emit('rapid_console', {
+                "message": f"❌ Robot físico: {payload.get('error')}",
+                "type": "error"
+            })
 
 threading.Thread(target=_irc5_worker, daemon=True).start()
+socketio.start_background_task(_irc5_eventos_bridge)
 
-def encolar_movimiento_irc5(angulos, speed=100.0):
-    global _irc5_q, _irc5_spd
+def encolar_movimiento_irc5(angulos, speed=100.0, secuencial=False):
+    """secuencial=True (programa RAPID): todos los targets se ejecutan en orden.
+    secuencial=False (sliders / jog): solo importa el ultimo target, se descartan los pendientes."""
     if estado_robot["robot_actual"] != "ABB_IRB_140" or len(angulos) != 6:
         return
     cli = get_shared_robot_client()
     if cli is None or not cli.is_connected():
         return
+    q = [float(x) for x in angulos]
+    spd = float(speed)
+    if cli.mode == "CONNECTED_PHYSICAL":
+        # Antes se mandaba 500 fijo y el validador lo rechazaba siempre (limite 100): el robot nunca se movia
+        spd = min(spd, cli.validator.VELOCIDAD_MAX_TEST)
+    # Validacion anticipada en el contexto del handler: el rechazo se ve en el navegador al instante
+    try:
+        validated = cli.validator.validate_motion_command(
+            "MOVE_JOINTS", {"joints": q, "speed": spd}, physical_confirmed=True
+        )
+    except SafetyValidationError as sve:
+        payload = {"cmd": "MOVE_JOINTS", "joints": q, "speed": spd, "success": False, "error": str(sve)}
+        log_robot_event("IN", payload)
+        socketio.emit('rapid_console', {"message": f"❌ Robot físico NO recibió el movimiento: {sve}", "type": "error"})
+        return
+    log_robot_event("OUT", {"cmd": "MOVE_JOINTS", "joints": validated["joints"], "speed": validated["speed"]})
     with _irc5_cond:
-        _irc5_q = [float(x) for x in angulos]
-        _irc5_spd = float(speed)
+        if not secuencial:
+            _irc5_fifo.clear()
+        _irc5_fifo.append((validated["joints"], validated["speed"]))
         _irc5_cond.notify()
 
 _stream_en_curso = False
@@ -876,13 +925,17 @@ def abort_rapid_execution():
     abort_execution_flag = True
     active_stream_token += 1
     with _irc5_cond:
-        _irc5_q = None
+        _irc5_fifo.clear()
     cli = get_shared_robot_client()
     if cli and cli.is_connected():
-        try:
-            cli.stop()
-        except Exception:
-            pass
+        # En hilo aparte: si el worker esta dentro de un MoveAbsJ retiene el lock del cliente y
+        # bloquear aqui congelaria todo el servidor gevent. El paro inmediato real es el FlexPendant.
+        def _stop_bg():
+            try:
+                cli.stop()
+            except Exception:
+                pass
+        threading.Thread(target=_stop_bg, daemon=True).start()
     print("[WS] Solicitud de abortar ejecución recibida y comando STOP despachado.")
 
 @socketio.on('execute_rapid_stream')
@@ -994,7 +1047,7 @@ def execute_rapid_stream(data):
                         if analisis:
                             payload['analisis_singularidades'] = analisis
                         if is_final:
-                            encolar_movimiento_irc5(estado_robot['angulos'], speed=500.0)
+                            encolar_movimiento_irc5(estado_robot['angulos'], speed=_speed_mm_s(movement.get('speed')), secuencial=True)
                         socketio.emit('actualizacion_robot', payload)
                         current_joints = joints.copy()
                         current_position = [estado['posicion']['x'], estado['posicion']['y'], estado['posicion']['z']]
@@ -1070,7 +1123,7 @@ def execute_rapid_stream(data):
                         if analisis:
                             payload['analisis_singularidades'] = analisis
                         if is_final:
-                            encolar_movimiento_irc5(estado_robot['angulos'], speed=500.0)
+                            encolar_movimiento_irc5(estado_robot['angulos'], speed=_speed_mm_s(movement.get('speed')), secuencial=True)
                         socketio.emit('actualizacion_robot', payload)
                         current_joints = joints.copy()
                         current_position = [estado['posicion']['x'], estado['posicion']['y'], estado['posicion']['z']]
@@ -1151,7 +1204,7 @@ def execute_rapid_stream(data):
                         if analisis:
                             payload['analisis_singularidades'] = analisis
                         if is_final:
-                            encolar_movimiento_irc5(estado_robot['angulos'], speed=500.0)
+                            encolar_movimiento_irc5(estado_robot['angulos'], speed=_speed_mm_s(movement.get('speed')), secuencial=True)
                         socketio.emit('actualizacion_robot', payload)
                         current_joints = joints.copy()
                         current_position = [estado['posicion']['x'], estado['posicion']['y'], estado['posicion']['z']]
@@ -1226,7 +1279,7 @@ def execute_rapid_stream(data):
                     if analisis:
                         payload['analisis_singularidades'] = analisis
                     if is_final:
-                            encolar_movimiento_irc5(estado_robot['angulos'], speed=500.0)
+                            encolar_movimiento_irc5(estado_robot['angulos'], speed=_speed_mm_s(movement.get('speed')), secuencial=True)
                     socketio.emit('actualizacion_robot', payload)
                     current_joints = joints.copy()
                     current_position = [estado['posicion']['x'], estado['posicion']['y'], estado['posicion']['z']]

@@ -13,6 +13,9 @@ class IRC5ClientError(Exception):
     pass
 
 class RobotClient:
+    # MoveAbsJ en RAPID es bloqueante: a v50 en T1 un giro amplio tarda bastante mas de 8 s
+    MOTION_TIMEOUT_S = 45.0
+
     def __init__(
         self,
         host: str = "127.0.0.1",
@@ -53,9 +56,14 @@ class RobotClient:
         self._proxy_url = None
         self._recv_buffer = b""
 
+    def is_busy(self) -> bool:
+        """True mientras otro hilo espera respuesta del robot (p.ej. un MoveAbsJ en curso)."""
+        return self._lock.locked()
+
     def is_connected(self) -> bool:
-        with self._lock:
-            return self.sock is not None or self._proxy_url is not None
+        # Sin lock a proposito: el worker de movimiento retiene _lock durante todo un MoveAbsJ y
+        # el panel consulta el estado cada 2 s; bloquear aqui congelaria el servidor gevent.
+        return self.sock is not None or self._proxy_url is not None
 
     def sync_validator_signals(self, allowed_di: Optional[Any] = None, allowed_do: Optional[Any] = None) -> None:
         self.validator.update_allowed_signals(allowed_di=allowed_di, allowed_do=allowed_do)
@@ -105,8 +113,9 @@ class RobotClient:
             headers={"Content-Type": "application/json"},
             method="POST"
         )
+        http_wait = self.MOTION_TIMEOUT_S + 5.0 if cmd in ("MOVE_JOINTS", "MOVE_PRESET") else max(self.timeout + 2.0, 5.0)
         try:
-            with urllib.request.urlopen(req, timeout=max(self.timeout + 2.0, 5.0)) as resp:
+            with urllib.request.urlopen(req, timeout=http_wait) as resp:
                 res = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as he:
             try:
@@ -182,6 +191,12 @@ class RobotClient:
         with self._lock:
             if self.sock is None and self._proxy_url is None:
                 return {"success": True, "message": "Ya desconectado"}
+            # Aviso previo a RAPID para que cierre su socket desde su lado y no dispare 41595 (ERR_SOCK_CLOSED)
+            if self.sock is not None and self._proxy_url is None:
+                try:
+                    self._exchange_unlocked("DISCONNECT", None, timeout_override=1.5)
+                except Exception:
+                    pass
             self._close_unlocked()
             return {"success": True, "message": "Desconectado de IRC5"}
 
@@ -200,7 +215,7 @@ class RobotClient:
         msg_id = self._next_id()
         raw_payload = IRC5Protocol.build_request(msg_id, cmd, params)
         wait_limit = timeout_override if timeout_override is not None else (
-            max(self.timeout, 8.0) if cmd in ("MOVE_JOINTS", "MOVE_PRESET") else self.timeout
+            max(self.timeout, self.MOTION_TIMEOUT_S) if cmd in ("MOVE_JOINTS", "MOVE_PRESET") else self.timeout
         )
 
         t0 = time.time()

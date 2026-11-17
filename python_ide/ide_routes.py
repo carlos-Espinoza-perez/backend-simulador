@@ -62,8 +62,32 @@ def register_joint_sync_callback(cb):
 
 shared_robot_client = RobotClient(host="127.0.0.1", port=5001, mode="SIMULATED")
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+def is_lan_host(host: str) -> bool:
+    h = (host or "").strip().lower()
+    return bool(h) and h not in _LOOPBACK_HOSTS and h != "0.0.0.0"
+
 def get_shared_robot_client() -> RobotClient:
     return shared_robot_client
+
+def log_robot_event(direction: str, payload: dict, latency_ms: float = None):
+    """Registra trafico generado fuera de las rutas HTTP (p.ej. el worker de movimiento del gemelo)
+    en el log de trafico y lo empuja al navegador para que ningun rechazo quede en silencio."""
+    try:
+        _sessions.get("default", default_session).log_traffic(direction, payload, latency_ms=latency_ms)
+    except Exception:
+        pass
+    if _socketio_instance is not None:
+        try:
+            _socketio_instance.emit("irc5_event", {
+                "direction": direction,
+                "payload": payload,
+                "latency_ms": latency_ms,
+                "timestamp": time.time()
+            })
+        except Exception:
+            pass
 
 def _notify_joints_if_present(res: dict):
     if _joint_sync_callback is None or not isinstance(res, dict) or not res.get("success"):
@@ -359,7 +383,9 @@ def connection_status():
         "latency_ms": client.last_latency_ms,
         "last_seen": client.last_seen,
         "mock_server_running": mock_server.is_running,
-        "physical_armed": client.validator.physical_armed
+        "physical_armed": client.validator.physical_armed,
+        "is_lan": is_lan_host(client.host),
+        "busy": client.is_busy()
     })
 
 @ide_bp.route("/api/connection/arm", methods=["POST"])
@@ -380,10 +406,17 @@ def arm_physical_connection():
 def connect_robot():
     session = get_current_session()
     data = request.get_json() or {}
-    host = data.get("host", session.active_robot_client.host)
+    host = str(data.get("host", session.active_robot_client.host)).strip()
     port = int(data.get("port", session.active_robot_client.port))
     timeout = float(data.get("timeout", session.active_robot_client.timeout))
     mode = data.get("mode", session.active_robot_client.mode)
+
+    # Conexion por LAN (IP distinta de localhost) => siempre es el robot fisico
+    is_lan = is_lan_host(host)
+    if is_lan:
+        mode = "CONNECTED_PHYSICAL"
+    # auto_arm: si no se envia, se arma solo al conectar por LAN; el panel lo controla con un check
+    auto_arm = bool(data.get("auto_arm", is_lan))
 
     if session.active_robot_client.is_connected():
         session.active_robot_client.disconnect()
@@ -394,14 +427,18 @@ def connect_robot():
         session.virtual_io_mgr.get_allowed_do()
     )
     res = session.active_robot_client.connect()
-    session.log_traffic("OUT", {"cmd": "CONNECT", "host": host, "port": port})
-    session.log_traffic("IN", res)
+    session.log_traffic("OUT", {"cmd": "CONNECT", "host": host, "port": port, "mode": mode, "auto_arm": auto_arm})
     if res.get("success"):
+        if auto_arm and mode == "CONNECTED_PHYSICAL":
+            session.active_robot_client.arm_physical_writes()
+        res["mode"] = mode
+        res["physical_armed"] = session.active_robot_client.validator.physical_armed
         try:
             j_res = session.active_robot_client.get_joints()
             _notify_joints_if_present(j_res)
         except Exception:
             pass
+    session.log_traffic("IN", res)
     return jsonify(res)
 
 @ide_bp.route("/api/connection/disconnect", methods=["POST"])
@@ -417,6 +454,8 @@ def ping_robot():
     session = get_current_session()
     if not session.active_robot_client.is_connected():
         return jsonify({"success": False, "error": "No conectado al controlador"}), 400
+    if session.active_robot_client.is_busy():
+        return jsonify({"success": False, "error": "Robot ocupado ejecutando un movimiento; intenta de nuevo cuando termine"}), 409
     try:
         session.log_traffic("OUT", {"cmd": "PING"})
         res = session.active_robot_client.ping()
@@ -430,6 +469,8 @@ def execute_command():
     session = get_current_session()
     if not session.active_robot_client.is_connected():
         return jsonify({"success": False, "error": "No conectado al controlador"}), 400
+    if session.active_robot_client.is_busy():
+        return jsonify({"success": False, "error": "Robot ocupado ejecutando un movimiento; intenta de nuevo cuando termine"}), 409
 
     data = request.get_json() or {}
     cmd = data.get("cmd", "").upper()
@@ -443,6 +484,27 @@ def execute_command():
             res = session.active_robot_client.ping()
         elif cmd == "GET_STATUS":
             res = session.active_robot_client.get_status()
+            if res.get("success") and isinstance(res.get("data"), dict):
+                cli = session.active_robot_client
+                d = res["data"]
+                warnings = []
+                if cli.mode == "CONNECTED_PHYSICAL" and not cli.validator.physical_armed:
+                    warnings.append("Canal fisico desarmado: activa el armado antes de mover.")
+                if d.get("speed_override", 100) <= 0:
+                    warnings.append("Velocidad del FlexPendant (speed_override) en 0%: el robot no se movera.")
+                if d.get("run_mode") == "step":
+                    warnings.append("Controlador en modo paso a paso (step): cambialo a continuo.")
+                if d.get("mode") == "manual_T1":
+                    warnings.append("Modo manual T1: manten presionado el habilitador (deadman switch) para mover.")
+                d["python_mode"] = cli.mode
+                d["physical_armed"] = cli.validator.physical_armed
+                d["max_speed_allowed"] = cli.validator.VELOCIDAD_MAX_TEST if cli.mode == "CONNECTED_PHYSICAL" else None
+                d["ready_to_move"] = (
+                    (cli.mode != "CONNECTED_PHYSICAL" or cli.validator.physical_armed)
+                    and d.get("speed_override", 100) > 0
+                    and d.get("run_mode", "continuous") != "step"
+                )
+                d["warnings"] = warnings
         elif cmd == "GET_DI":
             res = session.active_robot_client.get_di(name)
         elif cmd == "GET_DO":
@@ -455,6 +517,8 @@ def execute_command():
             res = session.active_robot_client.get_variable(name)
         elif cmd == "GET_JOINTS":
             res = session.active_robot_client.get_joints()
+        elif cmd == "STOP":
+            res = session.active_robot_client.stop()
         elif cmd == "MOVE_JOINTS":
             joints = data.get("joints") if data.get("joints") is not None else data.get("params", {}).get("joints")
             speed = float(data.get("speed") or data.get("params", {}).get("speed", 50.0))
