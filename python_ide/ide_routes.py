@@ -487,24 +487,71 @@ def execute_command():
             if res.get("success") and isinstance(res.get("data"), dict):
                 cli = session.active_robot_client
                 d = res["data"]
+                blockers = []
                 warnings = []
+                motors = d.get("motors", "unknown")
+                ovr = d.get("speed_override", 100)
+                r_mode = d.get("run_mode", "continuous")
+                op_mode = d.get("mode", "unknown")
+
                 if cli.mode == "CONNECTED_PHYSICAL" and not cli.validator.physical_armed:
-                    warnings.append("Canal fisico desarmado: activa el armado antes de mover.")
-                if d.get("speed_override", 100) <= 0:
-                    warnings.append("Velocidad del FlexPendant (speed_override) en 0%: el robot no se movera.")
-                if d.get("run_mode") == "step":
-                    warnings.append("Controlador en modo paso a paso (step): cambialo a continuo.")
-                if d.get("mode") == "manual_T1":
+                    blockers.append("Canal fisico desarmado: activa el armado antes de mover.")
+                if motors == "off":
+                    blockers.append("Motores apagados: en Auto pulsa Motors ON; en Manual presiona el habilitador.")
+                elif motors == "unknown":
+                    warnings.append("Estado de motores no disponible: configura la System Output 'Motor On' como do_motor_on en el EIO.")
+                if ovr <= 0:
+                    blockers.append("Velocidad del FlexPendant (speed_override) en 0%: el robot no se movera.")
+                elif ovr < 50:
+                    warnings.append(f"Velocidad del FlexPendant reducida ({ovr}%): los movimientos seran lentos.")
+                if r_mode != "continuous":
+                    blockers.append("El programa no esta en modo continuo: cambialo a continuo en el FlexPendant.")
+                if op_mode == "manual_T1":
                     warnings.append("Modo manual T1: manten presionado el habilitador (deadman switch) para mover.")
+                elif op_mode == "manual_T2":
+                    warnings.append("Modo manual T2 (velocidad completa): usa T1 para las pruebas.")
+                if d.get("last_errno", 0) not in (0, None):
+                    warnings.append(f"Ultimo fallo RAPID registrado: errno={d.get('last_errno')} ({d.get('last_error', '')}).")
+
+                joints = d.get("joints")
+                in_safe_envelope = True
+                outside_axes = []
+                if isinstance(joints, list) and len(joints) == 6:
+                    for idx, val in enumerate(joints):
+                        j_val = float(val)
+                        l_min, l_max = cli.validator.LIMITES_IRB140[idx]
+                        if j_val < l_min or j_val > l_max:
+                            blockers.append(f"Eje J{idx+1}={j_val}° fuera de limites mecanicos [{l_min}°, {l_max}°].")
+                        e_min, e_max = cli.validator.ENVOLVENTE_TEST_FISICO[idx]
+                        if j_val < e_min or j_val > e_max:
+                            in_safe_envelope = False
+                            outside_axes.append(f"J{idx+1}={j_val}° (lab [{e_min}°, {e_max}°])")
+                    if outside_axes:
+                        warnings.append("Posicion actual fuera de envolvente segura de laboratorio: " + ", ".join(outside_axes))
+                    if abs(float(joints[4])) < 5.0:
+                        warnings.append(f"Muneca cerca de singularidad (J5={joints[4]}°).")
+
+                ready = len(blockers) == 0
+                health = "BLOQUEADO" if blockers else ("ADVERTENCIA" if warnings else "OK")
+                if blockers:
+                    summary = f"BLOQUEADO ({len(blockers)}): " + blockers[0]
+                elif warnings:
+                    summary = f"Operativo con advertencias ({op_mode}, mot={motors}, vel={ovr}%, {r_mode})."
+                else:
+                    summary = f"Listo para operar ({op_mode}, mot={motors}, vel={ovr}%, {r_mode})."
+
                 d["python_mode"] = cli.mode
+                d["host"] = cli.host
+                d["port"] = cli.port
+                d["latency_ms"] = res.get("latency_ms")
                 d["physical_armed"] = cli.validator.physical_armed
                 d["max_speed_allowed"] = cli.validator.VELOCIDAD_MAX_TEST if cli.mode == "CONNECTED_PHYSICAL" else None
-                d["ready_to_move"] = (
-                    (cli.mode != "CONNECTED_PHYSICAL" or cli.validator.physical_armed)
-                    and d.get("speed_override", 100) > 0
-                    and d.get("run_mode", "continuous") != "step"
-                )
+                d["in_safe_envelope"] = in_safe_envelope
+                d["ready_to_move"] = ready
+                d["health"] = health
+                d["blockers"] = blockers
                 d["warnings"] = warnings
+                d["summary"] = summary
         elif cmd == "GET_DI":
             res = session.active_robot_client.get_di(name)
         elif cmd == "GET_DO":

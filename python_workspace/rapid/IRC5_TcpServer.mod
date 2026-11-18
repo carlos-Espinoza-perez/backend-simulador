@@ -7,6 +7,15 @@ MODULE IRC5_TcpServer
     LOCAL VAR bool keep_listening := TRUE;
     LOCAL VAR bool client_bye := FALSE;
     LOCAL VAR num rx_count := 0;
+    LOCAL VAR num last_errno := 0;
+    LOCAL VAR string last_cmd := "NONE";
+    LOCAL VAR string last_err_msg := "none";
+    ! Senal para leer el estado de motores. En el IRC5 se configura como System Output "Motor On"
+    ! (EIO > System Output). Si no existe, el modulo carga igual y se reporta "unknown".
+    LOCAL VAR signaldo sig_motor_on;
+    ! 0 = sin intentar, 1 = senal enlazada, -1 = la senal no existe en el EIO
+    LOCAL VAR num motor_alias := 0;
+    CONST string MOTOR_ON_SIGNAL := "do_motor_on";
 
     CONST num SERVER_PORT := 5001;
     CONST num RECV_TIMEOUT := 30;
@@ -150,15 +159,18 @@ MODULE IRC5_TcpServer
         ENDIF
 
         IF Contains(hdr, """cmd"":""PING""") THEN
+            last_cmd := "PING";
             SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":""PONG"",""error"":null}\0A");
             LogTx msg_id, "{""status"":""OK"",""data"":""PONG""}";
 
         ELSEIF Contains(hdr, """cmd"":""DISCONNECT""") THEN
+            last_cmd := "DISCONNECT";
             SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":""BYE"",""error"":null}\0A");
             LogTx msg_id, "{""status"":""OK"",""data"":""BYE""}";
             client_bye := TRUE;
 
         ELSEIF Contains(hdr, """cmd"":""STOP""") THEN
+            last_cmd := "STOP";
             LogTP "EXE StopMove + ClearPath";
             StopMove \Quick;
             ClearPath;
@@ -170,12 +182,15 @@ MODULE IRC5_TcpServer
             HandleGetStatus msg_id;
 
         ELSEIF Contains(hdr, """cmd"":""GET_JOINTS""") THEN
+            last_cmd := "GET_JOINTS";
             HandleGetJoints msg_id;
 
         ELSEIF Contains(hdr, """cmd"":""MOVE_JOINTS""") THEN
+            last_cmd := "MOVE_JOINTS";
             HandleMoveJoints body, msg_id;
 
         ELSEIF Contains(hdr, """cmd"":""MOVE_PRESET""") THEN
+            last_cmd := "MOVE_PRESET";
             HandleMovePreset body, msg_id;
 
         ELSEIF Contains(hdr, """cmd"":""GET_DI""") THEN
@@ -200,34 +215,63 @@ MODULE IRC5_TcpServer
         VAR pos p_curr;
         VAR string op_mode := "auto";
         VAR string r_mode := "continuous";
+        VAR string motors := "unknown";
         VAR num ovr := 100;
 
-        IF OpMode() = OP_MAN_PROG THEN
-            op_mode := "manual_T1";
-        ELSEIF OpMode() = OP_MAN_TEST THEN
-            op_mode := "manual_T2";
-        ELSEIF OpMode() <> OP_AUTO THEN
-            op_mode := "other";
-        ENDIF
-        IF RunMode() = RUN_STEP_MOVE THEN
+        op_mode := OpModeTxt();
+        IF RunMode() <> RUN_CONT_CYCLE THEN
             r_mode := "step";
         ENDIF
         ovr := CSpeedOverride();
+        motors := MotorState();
         jt_curr := CJointT();
         p_curr := CPos(\Tool:=tool0);
 
         SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",");
         SocketSend client_socket \Str:=("""data"":{""exec_state"":""running"",""mode"":""" + op_mode + """,""run_mode"":""" + r_mode + """,");
-        SocketSend client_socket \Str:=("""speed_override"":" + NumToStr(ovr, 0) + ",""cycle_counter"":" + NumToStr(cycle_counter, 0) + ",");
-        SocketSend client_socket \Str:=("""controller"":""IRC5_RW5"",""tcp_mm"":[" + NumToStr(p_curr.x, 1) + "," + NumToStr(p_curr.y, 1) + "," + NumToStr(p_curr.z, 1) + "],");
+        SocketSend client_socket \Str:=("""motors"":""" + motors + """,""speed_override"":" + NumToStr(ovr, 0) + ",");
+        SocketSend client_socket \Str:=("""cycle_counter"":" + NumToStr(cycle_counter, 0) + ",""rx_count"":" + NumToStr(rx_count, 0) + ",");
+        SocketSend client_socket \Str:=("""last_cmd"":""" + last_cmd + """,""last_errno"":" + NumToStr(last_errno, 0) + ",");
+        SocketSend client_socket \Str:=("""last_error"":""" + last_err_msg + """,""controller"":""IRC5_RW5"",");
+        SocketSend client_socket \Str:=("""tcp_mm"":[" + NumToStr(p_curr.x, 1) + "," + NumToStr(p_curr.y, 1) + "," + NumToStr(p_curr.z, 1) + "],");
         SocketSend client_socket \Str:=("""joints"":[" + NumToStr(jt_curr.robax.rax_1, 2) + "," + NumToStr(jt_curr.robax.rax_2, 2) + "," + NumToStr(jt_curr.robax.rax_3, 2) + ",");
         SocketSend client_socket \Str:=(NumToStr(jt_curr.robax.rax_4, 2) + "," + NumToStr(jt_curr.robax.rax_5, 2) + "," + NumToStr(jt_curr.robax.rax_6, 2) + "]},""error"":null}\0A");
-        LogTx msg_id, "OK STATUS " + op_mode + " " + NumToStr(ovr, 0) + "%";
+        LogTx msg_id, "OK STATUS " + op_mode + " mot=" + motors + " vel=" + NumToStr(ovr, 0) + "% " + r_mode;
         LogJoints "TX#" + NumToStr(msg_id, 0) + " q=", jt_curr;
     ERROR
         SendError msg_id, "ERROR_LECTURA_ESTADO";
         RETURN;
     ENDPROC
+
+    LOCAL FUNC string OpModeTxt()
+        IF OpMode() = OP_MAN_PROG THEN
+            RETURN "manual_T1";
+        ELSEIF OpMode() = OP_MAN_TEST THEN
+            RETURN "manual_T2";
+        ELSEIF OpMode() = OP_AUTO THEN
+            RETURN "auto";
+        ENDIF
+        RETURN "other";
+    ENDFUNC
+
+    ! Lee la System Output "Motor On" si esta configurada; si no existe responde "unknown"
+    ! sin detener el programa (AliasIO falla y lo atrapa el manejador de errores).
+    LOCAL FUNC string MotorState()
+        IF motor_alias = 0 THEN
+            motor_alias := -1;
+            AliasIO MOTOR_ON_SIGNAL, sig_motor_on;
+            motor_alias := 1;
+        ENDIF
+        IF motor_alias < 0 THEN
+            RETURN "unknown";
+        ENDIF
+        IF DOutput(sig_motor_on) = 1 THEN
+            RETURN "on";
+        ENDIF
+        RETURN "off";
+    ERROR
+        RETURN "unknown";
+    ENDFUNC
 
     LOCAL PROC HandleGetJoints(num msg_id)
         VAR jointtarget jt_curr;
@@ -331,7 +375,9 @@ MODULE IRC5_TcpServer
         SocketSend client_socket \Str:=(NumToStr(q4, 2) + "," + NumToStr(q5, 2) + "," + NumToStr(q6, 2) + "]},""error"":null}\0A");
         LogTx msg_id, "OK COMPLETED ciclo=" + NumToStr(cycle_counter, 0);
     ERROR
-        LogTP "ERR MoveAbsJ errno=" + NumToStr(ERRNO, 0);
+        last_errno := ERRNO;
+        last_err_msg := "MOVE_JOINTS_ERRNO_" + NumToStr(last_errno, 0);
+        LogTP "ERR MoveAbsJ errno=" + NumToStr(last_errno, 0);
         LogDiag "ERR";
         SendError msg_id, "FALLO_EJECUCION_MOVIMIENTO";
         RETURN;
@@ -363,7 +409,9 @@ MODULE IRC5_TcpServer
         SocketSend client_socket \Str:=("""data"":{""state"":""COMPLETED"",""target"":""" + preset_name + """},""error"":null}\0A");
         LogTx msg_id, "OK COMPLETED " + preset_name;
     ERROR
-        LogTP "ERR Preset errno=" + NumToStr(ERRNO, 0);
+        last_errno := ERRNO;
+        last_err_msg := "MOVE_PRESET_ERRNO_" + NumToStr(last_errno, 0);
+        LogTP "ERR Preset errno=" + NumToStr(last_errno, 0);
         LogDiag "ERR";
         SendError msg_id, "FALLO_EJECUCION_PRESET";
         RETURN;
@@ -430,6 +478,7 @@ MODULE IRC5_TcpServer
     ENDPROC
 
     LOCAL PROC SendError(num msg_id, string err_desc)
+        last_err_msg := err_desc;
         SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""ERROR"",""data"":null,");
         SocketSend client_socket \Str:=("""error"":""" + err_desc + """}\0A");
         LogTx msg_id, "ERROR " + err_desc;
@@ -469,25 +518,17 @@ MODULE IRC5_TcpServer
         LogTP prefix + clean;
     ENDPROC
 
-    ! Registra modo de operacion (auto/T1/T2), velocidad % del FlexPendant y modo de ciclo
+    ! Registra modo de operacion (auto/T1/T2), motores, velocidad % del FlexPendant y modo de ciclo
     LOCAL PROC LogDiag(string tag)
-        VAR string m := "auto";
         VAR string r := "cont";
         VAR num ovr := 100;
 
         IF NOT LOG_TP RETURN;
-        IF OpMode() = OP_MAN_PROG THEN
-            m := "manual_T1";
-        ELSEIF OpMode() = OP_MAN_TEST THEN
-            m := "manual_T2";
-        ELSEIF OpMode() <> OP_AUTO THEN
-            m := "otro";
-        ENDIF
-        IF RunMode() = RUN_STEP_MOVE THEN
+        IF RunMode() <> RUN_CONT_CYCLE THEN
             r := "paso";
         ENDIF
         ovr := CSpeedOverride();
-        LogTP tag + " modo=" + m + " vel=" + NumToStr(ovr, 0) + "% ciclo=" + r;
+        LogTP tag + " " + OpModeTxt() + " mot=" + MotorState() + " vel=" + NumToStr(ovr, 0) + "% " + r;
     ENDPROC
 
     ! Muestra la trama cruda recibida: "RX#12 {"id":12,"cmd":"PING","params":{}}"

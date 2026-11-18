@@ -127,6 +127,7 @@ class IRC5MockServer:
                     "exec_state": "running",
                     "mode": "virtual_simulated",
                     "run_mode": "continuous",
+                    "motors": "on",
                     "controller": "ABB_IRC5_MOCK",
                     "speed_override": 100,
                     "speed_ratio": 100,
