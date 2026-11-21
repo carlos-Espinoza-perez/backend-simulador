@@ -207,6 +207,8 @@ def emit_output(stream_type: str, text: str, client_id: str = "default"):
         })
 
 def notify_virtual_io_change(session: ClientSession):
+    if mock_server.is_running or session.active_robot_client.mode == "SIMULATED":
+        mock_server.virtual_io = session.virtual_io_mgr
     if _socketio_instance is not None:
         _socketio_instance.emit("virtual_io_updated", {
             "signals": session.virtual_io_mgr.list_signals(),
@@ -422,6 +424,7 @@ def connect_robot():
         session.active_robot_client.disconnect()
 
     session.active_robot_client = RobotClient(host=host, port=port, timeout=timeout, mode=mode, allow_loopback=True)
+    mock_server.virtual_io = session.virtual_io_mgr
     session.active_robot_client.sync_validator_signals(
         session.virtual_io_mgr.get_allowed_di(),
         session.virtual_io_mgr.get_allowed_do()
@@ -464,6 +467,223 @@ def ping_robot():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+def _read_controller_io(session: ClientSession) -> dict:
+    """Consulta las entradas (DI) y salidas (DO) registradas en el proyecto contra el controlador."""
+    cli = session.active_robot_client
+    di_names = set(session.virtual_io_mgr.get_allowed_di())
+    do_names = set(session.virtual_io_mgr.get_allowed_do())
+
+    di_map = {}
+    do_map = {}
+    errors = {}
+
+    for sig in sorted(di_names):
+        try:
+            r = cli.get_di(sig)
+            if r.get("success"):
+                di_map[sig] = r.get("data")
+            else:
+                errors[sig] = r.get("error", "Error al leer DI")
+        except Exception as e:
+            errors[sig] = str(e)
+
+    for sig in sorted(do_names):
+        try:
+            r = cli.get_do(sig)
+            if r.get("success"):
+                do_map[sig] = r.get("data")
+            else:
+                errors[sig] = r.get("error", "Error al leer DO")
+        except Exception as e:
+            errors[sig] = str(e)
+
+    return {
+        "di": di_map,
+        "do": do_map,
+        "errors": errors,
+        "total_di": len(di_map),
+        "total_do": len(do_map),
+    }
+
+
+def _enrich_status_data(session: ClientSession, res: dict, include_io: bool = True) -> dict:
+    """Valida condiciones de operacion, limites articulares y adjunta estados DI/DO al status."""
+    if not (isinstance(res, dict) and res.get("success") and isinstance(res.get("data"), dict)):
+        return res
+
+    cli = session.active_robot_client
+    d = res["data"]
+    blockers = []
+    warnings = []
+    motors = d.get("motors", "unknown")
+    ovr = d.get("speed_override", 100)
+    r_mode = d.get("run_mode", "continuous")
+    op_mode = d.get("mode", "unknown")
+
+    if cli.mode == "CONNECTED_PHYSICAL" and not cli.validator.physical_armed:
+        blockers.append("Canal fisico desarmado: activa el armado antes de mover.")
+    if motors == "off":
+        blockers.append("Motores apagados: en Auto pulsa Motors ON; en Manual presiona el habilitador.")
+    elif motors == "unknown":
+        warnings.append("Estado de motores no disponible: configura la System Output 'Motor On' como do_motor_on en el EIO.")
+    if ovr <= 0:
+        blockers.append("Velocidad del FlexPendant (speed_override) en 0%: el robot no se movera.")
+    elif ovr < 50:
+        warnings.append(f"Velocidad del FlexPendant reducida ({ovr}%): los movimientos seran lentos.")
+    if r_mode != "continuous":
+        blockers.append("El programa no esta en modo continuo: cambialo a continuo en el FlexPendant.")
+    if op_mode == "manual_T1":
+        warnings.append("Modo manual T1: manten presionado el habilitador (deadman switch) para mover.")
+    elif op_mode == "manual_T2":
+        warnings.append("Modo manual T2 (velocidad completa): usa T1 para las pruebas.")
+    if d.get("last_errno", 0) not in (0, None):
+        warnings.append(f"Ultimo fallo RAPID registrado: errno={d.get('last_errno')} ({d.get('last_error', '')}).")
+
+    joints = d.get("joints")
+    in_safe_envelope = True
+    outside_axes = []
+    if isinstance(joints, list) and len(joints) == 6:
+        for idx, val in enumerate(joints):
+            j_val = float(val)
+            l_min, l_max = cli.validator.LIMITES_IRB140[idx]
+            if j_val < l_min or j_val > l_max:
+                blockers.append(f"Eje J{idx+1}={j_val}° fuera de limites mecanicos [{l_min}°, {l_max}°].")
+            e_min, e_max = cli.validator.ENVOLVENTE_TEST_FISICO[idx]
+            if j_val < e_min or j_val > e_max:
+                in_safe_envelope = False
+                outside_axes.append(f"J{idx+1}={j_val}° (lab [{e_min}°, {e_max}°])")
+        if outside_axes:
+            warnings.append("Posicion actual fuera de envolvente segura de laboratorio: " + ", ".join(outside_axes))
+        if abs(float(joints[4])) < 5.0:
+            warnings.append(f"Muneca cerca de singularidad (J5={joints[4]}°).")
+
+    ready = len(blockers) == 0
+    health = "BLOQUEADO" if blockers else ("ADVERTENCIA" if warnings else "OK")
+    if blockers:
+        summary = f"BLOQUEADO ({len(blockers)}): " + blockers[0]
+    elif warnings:
+        summary = f"Operativo con advertencias ({op_mode}, mot={motors}, vel={ovr}%, {r_mode})."
+    else:
+        summary = f"Listo para operar ({op_mode}, mot={motors}, vel={ovr}%, {r_mode})."
+
+    d["python_mode"] = cli.mode
+    d["host"] = cli.host
+    d["port"] = cli.port
+    d["latency_ms"] = res.get("latency_ms")
+    d["physical_armed"] = cli.validator.physical_armed
+    d["max_speed_allowed"] = cli.validator.VELOCIDAD_MAX_TEST if cli.mode == "CONNECTED_PHYSICAL" else None
+    d["in_safe_envelope"] = in_safe_envelope
+    d["ready_to_move"] = ready
+    d["health"] = health
+    d["blockers"] = blockers
+    d["warnings"] = warnings
+    d["summary"] = summary
+
+    if include_io:
+        d["io"] = _read_controller_io(session)
+
+    return res
+
+
+@ide_bp.route("/api/connection/diagnostics", methods=["GET"])
+def connection_diagnostics():
+    """Endpoint integral de diagnostico: enlace, PING, GET_STATUS validado, DI/DO, limites y trafico."""
+    session = get_current_session()
+    cli = session.active_robot_client
+
+    conn_info = {
+        "is_connected": cli.is_connected(),
+        "host": cli.host,
+        "port": cli.port,
+        "mode": cli.mode,
+        "timeout": cli.timeout,
+        "latency_ms": cli.last_latency_ms,
+        "last_seen": cli.last_seen,
+        "is_lan": is_lan_host(cli.host),
+        "physical_armed": cli.validator.physical_armed,
+        "busy": cli.is_busy(),
+        "mock_server_running": mock_server.is_running,
+    }
+
+    safety_config = {
+        "velocidad_max_test": cli.validator.VELOCIDAD_MAX_TEST,
+        "limites_irb140": cli.validator.LIMITES_IRB140,
+        "envolvente_test_fisico": cli.validator.ENVOLVENTE_TEST_FISICO,
+        "authorized_presets": cli.validator.AUTHORIZED_PRESETS,
+    }
+
+    virtual_io_signals = session.virtual_io_mgr.list_signals()
+
+    if not cli.is_connected():
+        return jsonify({
+            "success": True,
+            "health": "DESCONECTADO",
+            "ready_to_move": False,
+            "summary": "No hay conexion activa con el controlador IRC5.",
+            "connection": conn_info,
+            "ping": None,
+            "status": None,
+            "io": None,
+            "safety_config": safety_config,
+            "virtual_io": virtual_io_signals,
+            "recent_traffic": session.traffic_logs[-20:],
+        })
+
+    if cli.is_busy():
+        return jsonify({
+            "success": False,
+            "health": "OCUPADO",
+            "ready_to_move": False,
+            "summary": "Robot ocupado ejecutando un movimiento; intenta de nuevo cuando termine.",
+            "connection": conn_info,
+            "safety_config": safety_config,
+            "virtual_io": virtual_io_signals,
+            "recent_traffic": session.traffic_logs[-20:],
+        }), 409
+
+    try:
+        ping_res = cli.ping()
+        status_res = _enrich_status_data(session, cli.get_status(), include_io=True)
+        status_data = status_res.get("data") if status_res.get("success") else None
+        io_data = status_data.get("io") if isinstance(status_data, dict) else None
+
+        session.log_traffic("OUT", {"cmd": "DIAGNOSTICS"})
+        session.log_traffic("IN", {
+            "success": bool(status_res.get("success")),
+            "health": status_data.get("health") if isinstance(status_data, dict) else "ERROR",
+            "summary": status_data.get("summary") if isinstance(status_data, dict) else status_res.get("error"),
+        }, latency_ms=ping_res.get("latency_ms"))
+
+        return jsonify({
+            "success": bool(ping_res.get("success") and status_res.get("success")),
+            "health": status_data.get("health") if isinstance(status_data, dict) else "ERROR",
+            "ready_to_move": status_data.get("ready_to_move", False) if isinstance(status_data, dict) else False,
+            "summary": status_data.get("summary") if isinstance(status_data, dict) else status_res.get("error"),
+            "connection": {
+                **conn_info,
+                "latency_ms": cli.last_latency_ms,
+                "last_seen": cli.last_seen,
+            },
+            "ping": ping_res,
+            "status": status_data,
+            "io": io_data,
+            "safety_config": safety_config,
+            "virtual_io": virtual_io_signals,
+            "recent_traffic": session.traffic_logs[-20:],
+        })
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "health": "ERROR",
+            "ready_to_move": False,
+            "error": str(e),
+            "connection": conn_info,
+            "safety_config": safety_config,
+            "virtual_io": virtual_io_signals,
+            "recent_traffic": session.traffic_logs[-20:],
+        }), 500
+
+
 @ide_bp.route("/api/connection/command", methods=["POST"])
 def execute_command():
     session = get_current_session()
@@ -483,75 +703,7 @@ def execute_command():
         if cmd == "PING":
             res = session.active_robot_client.ping()
         elif cmd == "GET_STATUS":
-            res = session.active_robot_client.get_status()
-            if res.get("success") and isinstance(res.get("data"), dict):
-                cli = session.active_robot_client
-                d = res["data"]
-                blockers = []
-                warnings = []
-                motors = d.get("motors", "unknown")
-                ovr = d.get("speed_override", 100)
-                r_mode = d.get("run_mode", "continuous")
-                op_mode = d.get("mode", "unknown")
-
-                if cli.mode == "CONNECTED_PHYSICAL" and not cli.validator.physical_armed:
-                    blockers.append("Canal fisico desarmado: activa el armado antes de mover.")
-                if motors == "off":
-                    blockers.append("Motores apagados: en Auto pulsa Motors ON; en Manual presiona el habilitador.")
-                elif motors == "unknown":
-                    warnings.append("Estado de motores no disponible: configura la System Output 'Motor On' como do_motor_on en el EIO.")
-                if ovr <= 0:
-                    blockers.append("Velocidad del FlexPendant (speed_override) en 0%: el robot no se movera.")
-                elif ovr < 50:
-                    warnings.append(f"Velocidad del FlexPendant reducida ({ovr}%): los movimientos seran lentos.")
-                if r_mode != "continuous":
-                    blockers.append("El programa no esta en modo continuo: cambialo a continuo en el FlexPendant.")
-                if op_mode == "manual_T1":
-                    warnings.append("Modo manual T1: manten presionado el habilitador (deadman switch) para mover.")
-                elif op_mode == "manual_T2":
-                    warnings.append("Modo manual T2 (velocidad completa): usa T1 para las pruebas.")
-                if d.get("last_errno", 0) not in (0, None):
-                    warnings.append(f"Ultimo fallo RAPID registrado: errno={d.get('last_errno')} ({d.get('last_error', '')}).")
-
-                joints = d.get("joints")
-                in_safe_envelope = True
-                outside_axes = []
-                if isinstance(joints, list) and len(joints) == 6:
-                    for idx, val in enumerate(joints):
-                        j_val = float(val)
-                        l_min, l_max = cli.validator.LIMITES_IRB140[idx]
-                        if j_val < l_min or j_val > l_max:
-                            blockers.append(f"Eje J{idx+1}={j_val}° fuera de limites mecanicos [{l_min}°, {l_max}°].")
-                        e_min, e_max = cli.validator.ENVOLVENTE_TEST_FISICO[idx]
-                        if j_val < e_min or j_val > e_max:
-                            in_safe_envelope = False
-                            outside_axes.append(f"J{idx+1}={j_val}° (lab [{e_min}°, {e_max}°])")
-                    if outside_axes:
-                        warnings.append("Posicion actual fuera de envolvente segura de laboratorio: " + ", ".join(outside_axes))
-                    if abs(float(joints[4])) < 5.0:
-                        warnings.append(f"Muneca cerca de singularidad (J5={joints[4]}°).")
-
-                ready = len(blockers) == 0
-                health = "BLOQUEADO" if blockers else ("ADVERTENCIA" if warnings else "OK")
-                if blockers:
-                    summary = f"BLOQUEADO ({len(blockers)}): " + blockers[0]
-                elif warnings:
-                    summary = f"Operativo con advertencias ({op_mode}, mot={motors}, vel={ovr}%, {r_mode})."
-                else:
-                    summary = f"Listo para operar ({op_mode}, mot={motors}, vel={ovr}%, {r_mode})."
-
-                d["python_mode"] = cli.mode
-                d["host"] = cli.host
-                d["port"] = cli.port
-                d["latency_ms"] = res.get("latency_ms")
-                d["physical_armed"] = cli.validator.physical_armed
-                d["max_speed_allowed"] = cli.validator.VELOCIDAD_MAX_TEST if cli.mode == "CONNECTED_PHYSICAL" else None
-                d["in_safe_envelope"] = in_safe_envelope
-                d["ready_to_move"] = ready
-                d["health"] = health
-                d["blockers"] = blockers
-                d["warnings"] = warnings
-                d["summary"] = summary
+            res = _enrich_status_data(session, session.active_robot_client.get_status(), include_io=True)
         elif cmd == "GET_DI":
             res = session.active_robot_client.get_di(name)
         elif cmd == "GET_DO":
@@ -559,6 +711,11 @@ def execute_command():
         elif cmd == "SET_DO":
             res = session.active_robot_client.set_do(name, val, physical_confirmed=physical_confirmed)
             if res.get("success"):
+                try:
+                    if session.virtual_io_mgr.get_signal(name):
+                        session.virtual_io_mgr.update_signal_value(name, res.get("data", val))
+                except Exception:
+                    pass
                 notify_virtual_io_change(session)
         elif cmd == "GET_VARIABLE":
             res = session.active_robot_client.get_variable(name)
@@ -596,7 +753,9 @@ def execute_command():
 
 @ide_bp.route("/api/connection/mock_server/start", methods=["POST"])
 def start_mock_server():
+    session = get_current_session()
     try:
+        mock_server.virtual_io = session.virtual_io_mgr
         mock_server.start()
         return jsonify({"success": True, "message": f"Servidor simulado iniciado en {mock_server.host}:{mock_server.port}"})
     except Exception as e:
@@ -688,22 +847,167 @@ def create_virtual_signal():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
+@ide_bp.route("/api/virtual_io/sync", methods=["POST", "GET"])
+def sync_virtual_signals():
+    session = get_current_session()
+    cli = session.active_robot_client
+    cli.sync_validator_signals(
+        session.virtual_io_mgr.get_allowed_di(),
+        session.virtual_io_mgr.get_allowed_do()
+    )
+
+    if not cli.is_connected():
+        return jsonify({
+            "success": True,
+            "connected": False,
+            "signals": session.virtual_io_mgr.list_signals(),
+            "synced_count": 0,
+            "error_count": 0,
+            "message": "Sin conexion activa con el controlador; mostrando estado local."
+        })
+
+    if cli.is_busy():
+        return jsonify({
+            "success": False,
+            "error": "Robot ocupado ejecutando un movimiento; intenta de nuevo cuando termine"
+        }), 409
+
+    result_signals = []
+    synced_count = 0
+    error_count = 0
+
+    for sig in session.virtual_io_mgr.list_signals():
+        entry = dict(sig)
+        name = sig["name"]
+        stype = sig["type"]
+        try:
+            r = cli.get_di(name) if stype == "DI" else cli.get_do(name)
+            if r.get("success") and r.get("data") is not None:
+                cval = int(r["data"])
+                updated = session.virtual_io_mgr.update_signal_value(name, cval)
+                entry.update(updated)
+                entry["synced"] = True
+                entry["controller_value"] = cval
+                entry["controller_error"] = None
+                synced_count += 1
+            else:
+                entry["synced"] = False
+                entry["controller_value"] = None
+                entry["controller_error"] = r.get("error", "No disponible en controlador")
+                error_count += 1
+        except Exception as exc:
+            entry["synced"] = False
+            entry["controller_value"] = None
+            entry["controller_error"] = str(exc)
+            error_count += 1
+        result_signals.append(entry)
+
+    notify_virtual_io_change(session)
+    return jsonify({
+        "success": True,
+        "connected": True,
+        "mode": cli.mode,
+        "mock_server_running": mock_server.is_running,
+        "signals": result_signals,
+        "synced_count": synced_count,
+        "error_count": error_count,
+    })
+
 @ide_bp.route("/api/virtual_io/signal/update", methods=["POST"])
 def update_virtual_signal():
     session = get_current_session()
     data = request.get_json() or {}
     name = data.get("name")
     val = data.get("value")
+    sync_controller = bool(data.get("sync_controller", True))
+    physical_confirmed = bool(data.get("physical_confirmed", False))
 
     if not name or val is None:
         return jsonify({"success": False, "error": "Parametros insuficientes ('name', 'value')"}), 400
 
+    sig = session.virtual_io_mgr.get_signal(name)
+    if not sig:
+        return jsonify({"success": False, "error": f"Senal '{name}' no encontrada"}), 404
+
+    cli = session.active_robot_client
+    applied_to_controller = False
+
+    if sync_controller and cli.is_connected():
+        cli.sync_validator_signals(
+            session.virtual_io_mgr.get_allowed_di(),
+            session.virtual_io_mgr.get_allowed_do()
+        )
+        if sig["type"] == "DO":
+            if cli.is_busy():
+                return jsonify({"success": False, "error": "Robot ocupado ejecutando un movimiento; intenta de nuevo cuando termine"}), 409
+            session.log_traffic("OUT", {"cmd": "SET_DO", "name": name, "value": val, "physical_confirmed": physical_confirmed})
+            try:
+                r = cli.set_do(name, val, physical_confirmed=physical_confirmed)
+                session.log_traffic("IN", r, latency_ms=r.get("latency_ms"))
+            except SafetyValidationError as sve:
+                err_res = {"success": False, "error": f"Seguridad: {sve}"}
+                session.log_traffic("IN", err_res)
+                return jsonify(err_res), 403
+            except Exception as e:
+                err_res = {"success": False, "error": str(e)}
+                session.log_traffic("IN", err_res)
+                return jsonify(err_res), 500
+
+            if not r.get("success"):
+                return jsonify({"success": False, "error": r.get("error", "Error al escribir DO en controlador")}), 400
+            applied_to_controller = True
+        elif sig["type"] == "DI" and not mock_server.is_running:
+            return jsonify({
+                "success": False,
+                "error": "Las entradas digitales (DI) en el robot/RobotStudio son de solo lectura desde RAPID. Usa 'Leer del robot' para consultarlas."
+            }), 400
+        elif sig["type"] == "DI" and mock_server.is_running:
+            mock_server.virtual_io = session.virtual_io_mgr
+            applied_to_controller = True
+
     try:
         updated = session.virtual_io_mgr.update_signal_value(name, val)
+        notify_virtual_io_change(session)
+        signal_payload = dict(updated)
+        if applied_to_controller:
+            signal_payload["synced"] = True
+            signal_payload["controller_value"] = updated["value"]
+            signal_payload["controller_error"] = None
+        return jsonify({
+            "success": True,
+            "signal": signal_payload,
+            "applied_to_controller": applied_to_controller,
+        })
+    except KeyError:
+        return jsonify({"success": False, "error": f"Senal '{name}' no encontrada"}), 404
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+@ide_bp.route("/api/virtual_io/signal/edit", methods=["POST"])
+def edit_virtual_signal():
+    session = get_current_session()
+    data = request.get_json() or {}
+    name = data.get("name")
+    new_name = data.get("new_name")
+    description = data.get("description")
+    val = data.get("value")
+
+    if not name:
+        return jsonify({"success": False, "error": "Falta parametro 'name'"}), 400
+
+    try:
+        updated = session.virtual_io_mgr.edit_signal(
+            name=name,
+            new_name=new_name,
+            description=description,
+            value=val
+        )
         notify_virtual_io_change(session)
         return jsonify({"success": True, "signal": updated})
     except KeyError:
         return jsonify({"success": False, "error": f"Senal '{name}' no encontrada"}), 404
+    except ValueError as ve:
+        return jsonify({"success": False, "error": str(ve)}), 400
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
@@ -738,7 +1042,13 @@ def reset_virtual_signals():
 def export_eio_cfg():
     session = get_current_session()
     try:
-        content = session.virtual_io_mgr.generate_eio_cfg()
-        return jsonify({"success": True, "content": content, "filename": "EIO.cfg"})
+        rw_raw = request.args.get("rw", "6")
+        try:
+            rw = 5 if int(rw_raw) == 5 else 6
+        except (ValueError, TypeError):
+            rw = 6
+        include_motor_on = request.args.get("include_motor_on", "true").strip().lower() != "false"
+        content = session.virtual_io_mgr.generate_eio_cfg(rw_version=rw, include_motor_on=include_motor_on)
+        return jsonify({"success": True, "content": content, "filename": "EIO.cfg", "rw_version": rw})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500

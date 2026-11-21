@@ -139,6 +139,47 @@ class VirtualIOManager:
             self._save()
             return self.signals[name]
 
+    def edit_signal(
+        self,
+        name: str,
+        new_name: Optional[str] = None,
+        description: Optional[str] = None,
+        value: Optional[Any] = None
+    ) -> Dict[str, Any]:
+        if name.lower() in BLOCKED_SYSTEM_SIGNALS:
+            raise ValueError(f"Acceso denegado: '{name}' es una senal critica protegida de seguridad")
+
+        with self._lock:
+            if name not in self.signals:
+                raise KeyError(f"Senal no encontrada: '{name}'")
+
+            entry = dict(self.signals[name])
+            target_key = name
+
+            if new_name is not None:
+                cleaned_new = new_name.strip()
+                if cleaned_new != name:
+                    if not SIGNAL_NAME_PATTERN.match(cleaned_new):
+                        raise ValueError(f"Identificador invalido '{new_name}': solo letras, numeros y guion bajo (max 32)")
+                    if cleaned_new.lower() in BLOCKED_SYSTEM_SIGNALS:
+                        raise ValueError(f"Identificador reservado por seguridad: '{new_name}'")
+                    if cleaned_new in self.signals:
+                        raise ValueError(f"La senal '{cleaned_new}' ya existe")
+                    entry["name"] = cleaned_new
+                    target_key = cleaned_new
+
+            if description is not None:
+                entry["description"] = str(description).strip()
+
+            if value is not None:
+                entry["value"] = 1 if int(value) > 0 else 0
+
+            if target_key != name:
+                del self.signals[name]
+            self.signals[target_key] = entry
+            self._save()
+            return dict(entry)
+
     def delete_signal(self, name: str) -> bool:
         if name.lower() in BLOCKED_SYSTEM_SIGNALS:
             raise ValueError(f"Acceso denegado: '{name}' es una senal critica protegida de seguridad")
@@ -163,21 +204,34 @@ class VirtualIOManager:
         with self._lock:
             return {name for name, s in self.signals.items() if s["type"] == "DO"}
 
-    def generate_eio_cfg(self) -> str:
+    def generate_eio_cfg(self, rw_version: int = 6, include_motor_on: bool = True) -> str:
+        rw = 5 if int(rw_version) == 5 else 6
         with self._lock:
-            lines = [
-                "EIO:CFG_1.0:6:0::",
-                "# Configuracion de E/S para RobotWare 6",
-                "# Senales declaradas en BOARD10 para simulacion / gemelo digital.",
-                "",
-                "EIO_BUS:",
-                "      -Name \"Virtual\" -BusType \"VIRTUAL\"",
-                "",
-                "EIO_UNIT:",
-                "      -Name \"BOARD10\" -UnitType \"Virtual\" -Bus \"Virtual\"",
-                "",
-                "EIO_SIGNAL:"
-            ]
+            if rw == 5:
+                lines = [
+                    "EIO:CFG_1.0:5:0::",
+                    "# Configuracion de E/S para RobotWare 5 (IRC5 Fisico)",
+                    "# Unidad virtual BOARD10 sobre bus Virtual1 (incluido en RW5).",
+                    "",
+                    "EIO_UNIT:",
+                    "      -Name \"BOARD10\" -UnitType \"Virtual\" -Bus \"Virtual1\"",
+                    "",
+                    "EIO_SIGNAL:"
+                ]
+            else:
+                lines = [
+                    "EIO:CFG_1.0:6:0::",
+                    "# Configuracion de E/S para RobotWare 6 (RobotStudio)",
+                    "# Senales declaradas en BOARD10 para simulacion / gemelo digital.",
+                    "",
+                    "EIO_BUS:",
+                    "      -Name \"Virtual\" -BusType \"VIRTUAL\"",
+                    "",
+                    "EIO_UNIT:",
+                    "      -Name \"BOARD10\" -UnitType \"Virtual\" -Bus \"Virtual\"",
+                    "",
+                    "EIO_SIGNAL:"
+                ]
 
             di_idx = 0
             do_idx = 0
@@ -185,22 +239,34 @@ class VirtualIOManager:
             for name in sorted(self.signals.keys()):
                 s = self.signals[name]
                 st = s["type"]
-                desc = s.get("description", "")
+                access_suffix = ' -Access "All"' if rw == 5 else ""
                 if st == "DI":
-                    lines.append(f'      -Name "{name}" -SignalType "DI" -Unit "BOARD10" -UnitMap "{di_idx}"')
+                    lines.append(f'      -Name "{name}" -SignalType "DI" -Unit "BOARD10" -UnitMap "{di_idx}"{access_suffix}')
                     di_idx += 1
                 elif st == "DO":
-                    lines.append(f'      -Name "{name}" -SignalType "DO" -Unit "BOARD10" -UnitMap "{do_idx}"')
+                    lines.append(f'      -Name "{name}" -SignalType "DO" -Unit "BOARD10" -UnitMap "{do_idx}"{access_suffix}')
                     do_idx += 1
 
+            has_motor_on = "do_motor_on" in self.signals
+            if include_motor_on:
+                if not has_motor_on:
+                    access_suffix = ' -Access "All"' if rw == 5 else ""
+                    lines.append(f'      -Name "do_motor_on" -SignalType "DO" -Unit "BOARD10" -UnitMap "{do_idx}"{access_suffix}')
+                lines.extend([
+                    "",
+                    "SYSSIG_OUT:",
+                    '      -Status "MotorOn" -Signal "do_motor_on"'
+                ])
+
+            bus_hint = "DeviceNet1" if rw == 5 else "DeviceNet"
             lines.extend([
                 "",
                 "# Plantilla borrador para hardware fisico (DSQC 652 en DeviceNet)",
                 "# EIO_UNIT:",
-                "#       -Name \"d652_cell\" -UnitType \"d652\" -Bus \"DeviceNet\" -DeviceNetAddress 10",
+                f'#       -Name "d652_cell" -UnitType "d652" -Bus "{bus_hint}" -DeviceNetAddress 10',
                 "# EIO_SIGNAL:",
-                "#       -Name \"di_real_pieza\" -SignalType \"DI\" -Unit \"d652_cell\" -UnitMap \"0\"",
-                "#       -Name \"do_real_valvula\" -SignalType \"DO\" -Unit \"d652_cell\" -UnitMap \"0\"",
+                '#       -Name "di_real_pieza" -SignalType "DI" -Unit "d652_cell" -UnitMap "0"',
+                '#       -Name "do_real_valvula" -SignalType "DO" -Unit "d652_cell" -UnitMap "0"',
                 ""
             ])
             return "\n".join(lines)

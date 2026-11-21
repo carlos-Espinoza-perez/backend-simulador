@@ -1,11 +1,29 @@
 MODULE IRC5_TcpServer
+    ! Servidor TCP para gemelo digital - compatible RobotWare 5 (requiere opcion 616-1 PC Interface)
+    ! Bitacora: todo lo recibido, ejecutado y respondido se escribe en la ventana de operador (TPWrite)
     LOCAL VAR socketdev server_socket;
     LOCAL VAR socketdev client_socket;
     LOCAL VAR string client_ip;
     LOCAL VAR bool keep_listening := TRUE;
+    LOCAL VAR bool client_bye := FALSE;
+    LOCAL VAR num rx_count := 0;
+    LOCAL VAR num last_errno := 0;
+    LOCAL VAR string last_cmd := "NONE";
+    LOCAL VAR string last_err_msg := "none";
+    ! Senal para leer el estado de motores. En el IRC5 se configura como System Output "Motor On"
+    ! (EIO > System Output). Si no existe, el modulo carga igual y se reporta "unknown".
+    LOCAL VAR signaldo sig_motor_on;
+    ! En RAPID los tipos signaldi/signaldo son non-value y deben declararse a nivel de MODULE
+    LOCAL VAR signaldi sig_io_in;
+    LOCAL VAR signaldo sig_io_out;
+    ! 0 = sin intentar, 1 = senal enlazada, -1 = la senal no existe en el EIO
+    LOCAL VAR num motor_alias := 0;
+    CONST string MOTOR_ON_SIGNAL := "do_motor_on";
 
     CONST num SERVER_PORT := 5001;
     CONST num RECV_TIMEOUT := 30;
+    ! TRUE: muestra en el FlexPendant cada trama, instruccion y respuesta (incluido PING)
+    CONST bool LOG_TP := TRUE;
 
     PERS num cycle_counter := 0;
     PERS num current_speed := 100;
@@ -15,6 +33,9 @@ MODULE IRC5_TcpServer
     CONST jointtarget JT_SAFE_1 := [[0,15,-15,0,30,0],[9E+9,9E+9,9E+9,9E+9,9E+9,9E+9]];
 
     PROC main()
+        TPErase;
+        LogTP "=== IRC5_TcpServer (RW5) - bitacora activa ===";
+        LogDiag "CFG";
         EnsureServer;
         WHILE keep_listening DO
             AcceptAndServe;
@@ -33,26 +54,31 @@ MODULE IRC5_TcpServer
             SocketBind server_socket, "0.0.0.0", SERVER_PORT;
             SocketListen server_socket;
             ErrWrite \I, "IRC5 TCP 5001", "Escuchando conexiones en 0.0.0.0:5001";
-            TPWrite "Servidor TCP activo en puerto 5001";
+            LogTP "Servidor TCP activo en puerto 5001";
         ENDIF
     ENDPROC
 
     LOCAL PROC AcceptAndServe()
         EnsureServer;
+        LogTP "Esperando cliente...";
         SocketAccept server_socket, client_socket \ClientAddress:=client_ip \Time:=WAIT_MAX;
         ErrWrite \I, "IRC5 TCP 5001", "Cliente conectado: " + client_ip;
-        TPWrite "Cliente conectado: " + client_ip;
+        LogTP "Cliente conectado: " + client_ip;
+        LogDiag "CFG";
 
+        client_bye := FALSE;
         ClientLoop;
 
         IF SocketGetStatus(client_socket) <> SOCKET_CLOSED THEN
             SocketClose client_socket;
         ENDIF
         ErrWrite \I, "IRC5 TCP 5001", "Cliente desconectado, esperando nueva conexion";
+        LogTP "Cliente desconectado";
     ERROR
         IF ERRNO = ERR_SOCK_TIMEOUT THEN
             RETRY;
         ELSE
+            LogTP "ERROR socket servidor, errno " + NumToStr(ERRNO, 0) + ". Reiniciando";
             IF SocketGetStatus(client_socket) <> SOCKET_CLOSED THEN
                 SocketClose client_socket;
             ENDIF
@@ -73,9 +99,10 @@ MODULE IRC5_TcpServer
         VAR string hdr;
         VAR string body;
 
-        WHILE TRUE DO
+        WHILE NOT client_bye DO
             ClearRawBytes rx_raw;
-            SocketReceive client_socket \RawData:=rx_raw \Time:=RECV_TIMEOUT;
+            ! WAIT_MAX evita el warning 41581 (ERR_SOCK_TIMEOUT) cada 30s en el registro de eventos
+            SocketReceive client_socket \RawData:=rx_raw \Time:=WAIT_MAX;
             n_bytes := RawBytesLen(rx_raw);
 
             IF n_bytes >= 2 THEN
@@ -98,13 +125,19 @@ MODULE IRC5_TcpServer
                     ENDIF
                 ENDIF
 
+                rx_count := rx_count + 1;
+                LogRx hdr, n_bytes;
                 ProcessFrame hdr, body;
             ENDIF
         ENDWHILE
     ERROR
         IF ERRNO = ERR_SOCK_TIMEOUT THEN
             RETRY;
+        ELSEIF ERRNO = ERR_SOCK_CLOSED THEN
+            LogTP "La PC cerro la conexion sin DISCONNECT";
+            RETURN;
         ELSE
+            LogTP "ERROR en recepcion, errno " + NumToStr(ERRNO, 0);
             RETURN;
         ENDIF
     ENDPROC
@@ -114,6 +147,7 @@ MODULE IRC5_TcpServer
         VAR num p_id := 0;
 
         IF StrLen(hdr) < 10 THEN
+            LogTP "  Trama descartada (muy corta)";
             RETURN;
         ENDIF
 
@@ -128,24 +162,38 @@ MODULE IRC5_TcpServer
         ENDIF
 
         IF Contains(hdr, """cmd"":""PING""") THEN
+            last_cmd := "PING";
             SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":""PONG"",""error"":null}\0A");
+            LogTx msg_id, "{""status"":""OK"",""data"":""PONG""}";
+
+        ELSEIF Contains(hdr, """cmd"":""DISCONNECT""") THEN
+            last_cmd := "DISCONNECT";
+            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":""BYE"",""error"":null}\0A");
+            LogTx msg_id, "{""status"":""OK"",""data"":""BYE""}";
+            client_bye := TRUE;
 
         ELSEIF Contains(hdr, """cmd"":""STOP""") THEN
+            last_cmd := "STOP";
+            LogTP "EXE StopMove + ClearPath";
             StopMove \Quick;
             ClearPath;
             StartMove;
             SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":""STOPPED"",""error"":null}\0A");
+            LogTx msg_id, "{""status"":""OK"",""data"":""STOPPED""}";
 
         ELSEIF Contains(hdr, """cmd"":""GET_STATUS""") THEN
             HandleGetStatus msg_id;
 
         ELSEIF Contains(hdr, """cmd"":""GET_JOINTS""") THEN
+            last_cmd := "GET_JOINTS";
             HandleGetJoints msg_id;
 
         ELSEIF Contains(hdr, """cmd"":""MOVE_JOINTS""") THEN
+            last_cmd := "MOVE_JOINTS";
             HandleMoveJoints body, msg_id;
 
         ELSEIF Contains(hdr, """cmd"":""MOVE_PRESET""") THEN
+            last_cmd := "MOVE_PRESET";
             HandleMovePreset body, msg_id;
 
         ELSEIF Contains(hdr, """cmd"":""GET_DI""") THEN
@@ -167,17 +215,66 @@ MODULE IRC5_TcpServer
 
     LOCAL PROC HandleGetStatus(num msg_id)
         VAR jointtarget jt_curr;
+        VAR pos p_curr;
+        VAR string op_mode := "auto";
+        VAR string r_mode := "continuous";
+        VAR string motors := "unknown";
+        VAR num ovr := 100;
+
+        op_mode := OpModeTxt();
+        IF RunMode() <> RUN_CONT_CYCLE THEN
+            r_mode := "step";
+        ENDIF
+        ovr := CSpeedOverride();
+        motors := MotorState();
         jt_curr := CJointT();
+        p_curr := CPos(\Tool:=tool0);
 
         SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",");
-        SocketSend client_socket \Str:=("""data"":{""exec_state"":""running"",""mode"":""auto"",""joints"":[");
-        SocketSend client_socket \Str:=(NumToStr(jt_curr.robax.rax_1, 2) + "," + NumToStr(jt_curr.robax.rax_2, 2) + "," + NumToStr(jt_curr.robax.rax_3, 2) + ",");
+        SocketSend client_socket \Str:=("""data"":{""exec_state"":""running"",""mode"":""" + op_mode + """,""run_mode"":""" + r_mode + """,");
+        SocketSend client_socket \Str:=("""motors"":""" + motors + """,""speed_override"":" + NumToStr(ovr, 0) + ",");
+        SocketSend client_socket \Str:=("""cycle_counter"":" + NumToStr(cycle_counter, 0) + ",""rx_count"":" + NumToStr(rx_count, 0) + ",");
+        SocketSend client_socket \Str:=("""last_cmd"":""" + last_cmd + """,""last_errno"":" + NumToStr(last_errno, 0) + ",");
+        SocketSend client_socket \Str:=("""last_error"":""" + last_err_msg + """,""controller"":""IRC5_RW5"",");
+        SocketSend client_socket \Str:=("""tcp_mm"":[" + NumToStr(p_curr.x, 1) + "," + NumToStr(p_curr.y, 1) + "," + NumToStr(p_curr.z, 1) + "],");
+        SocketSend client_socket \Str:=("""joints"":[" + NumToStr(jt_curr.robax.rax_1, 2) + "," + NumToStr(jt_curr.robax.rax_2, 2) + "," + NumToStr(jt_curr.robax.rax_3, 2) + ",");
         SocketSend client_socket \Str:=(NumToStr(jt_curr.robax.rax_4, 2) + "," + NumToStr(jt_curr.robax.rax_5, 2) + "," + NumToStr(jt_curr.robax.rax_6, 2) + "]},""error"":null}\0A");
+        LogTx msg_id, "OK STATUS " + op_mode + " mot=" + motors + " vel=" + NumToStr(ovr, 0) + "% " + r_mode;
+        LogJoints "TX#" + NumToStr(msg_id, 0) + " q=", jt_curr;
     ERROR
-        SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",");
-        SocketSend client_socket \Str:=("""data"":{""exec_state"":""running"",""mode"":""auto""},""error"":null}\0A");
+        SendError msg_id, "ERROR_LECTURA_ESTADO";
         RETURN;
     ENDPROC
+
+    LOCAL FUNC string OpModeTxt()
+        IF OpMode() = OP_MAN_PROG THEN
+            RETURN "manual_T1";
+        ELSEIF OpMode() = OP_MAN_TEST THEN
+            RETURN "manual_T2";
+        ELSEIF OpMode() = OP_AUTO THEN
+            RETURN "auto";
+        ENDIF
+        RETURN "other";
+    ENDFUNC
+
+    ! Lee la System Output "Motor On" si esta configurada; si no existe responde "unknown"
+    ! sin detener el programa (AliasIO falla y lo atrapa el manejador de errores).
+    LOCAL FUNC string MotorState()
+        IF motor_alias = 0 THEN
+            motor_alias := -1;
+            AliasIO MOTOR_ON_SIGNAL, sig_motor_on;
+            motor_alias := 1;
+        ENDIF
+        IF motor_alias < 0 THEN
+            RETURN "unknown";
+        ENDIF
+        IF DOutput(sig_motor_on) = 1 THEN
+            RETURN "on";
+        ENDIF
+        RETURN "off";
+    ERROR
+        RETURN "unknown";
+    ENDFUNC
 
     LOCAL PROC HandleGetJoints(num msg_id)
         VAR jointtarget jt_curr;
@@ -186,6 +283,7 @@ MODULE IRC5_TcpServer
         SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":{""joints"":[");
         SocketSend client_socket \Str:=(NumToStr(jt_curr.robax.rax_1, 2) + "," + NumToStr(jt_curr.robax.rax_2, 2) + "," + NumToStr(jt_curr.robax.rax_3, 2) + ",");
         SocketSend client_socket \Str:=(NumToStr(jt_curr.robax.rax_4, 2) + "," + NumToStr(jt_curr.robax.rax_5, 2) + "," + NumToStr(jt_curr.robax.rax_6, 2) + "]},""error"":null}\0A");
+        LogJoints "TX#" + NumToStr(msg_id, 0) + " OK ", jt_curr;
     ERROR
         SendError msg_id, "ERROR_LECTURA_ARTICULACIONES";
         RETURN;
@@ -195,6 +293,7 @@ MODULE IRC5_TcpServer
         VAR num p_curr := 0;
         VAR num p_spd := 0;
         VAR num spd_val := 100;
+        VAR string spd_name := "v100";
         VAR num q1 := 0;
         VAR num q2 := 0;
         VAR num q3 := 0;
@@ -243,32 +342,46 @@ MODULE IRC5_TcpServer
             RETURN;
         ENDIF
 
-        spd := v500;
+        ! Si "speed" no llega completo (trama recortada a 80 caracteres) se usa v50, la mas lenta
+        spd := v50;
+        spd_name := "v50";
         p_spd := StrMatch(body, 1, """speed"":");
         IF p_spd <= StrLen(body) THEN
             spd_val := ExtractFloat(body, p_spd + 8);
             IF spd_val <= 50 THEN
                 spd := v50;
+                spd_name := "v50";
             ELSEIF spd_val <= 100 THEN
                 spd := v100;
+                spd_name := "v100";
             ELSEIF spd_val <= 200 THEN
                 spd := v200;
+                spd_name := "v200";
             ELSEIF spd_val <= 500 THEN
                 spd := v500;
+                spd_name := "v500";
             ELSE
                 spd := v1000;
+                spd_name := "v1000";
             ENDIF
         ENDIF
 
         target_jt := [[q1, q2, q3, q4, q5, q6], [9E+9, 9E+9, 9E+9, 9E+9, 9E+9, 9E+9]];
-        MoveAbsJ target_jt, spd, z10, tool0;
+        LogJoints "EXE MoveAbsJ " + spd_name + " ", target_jt;
+        ! fine: la respuesta COMPLETED se envia cuando el robot realmente llego al punto
+        MoveAbsJ target_jt, spd, fine, tool0;
         cycle_counter := cycle_counter + 1;
 
         SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",");
         SocketSend client_socket \Str:=("""data"":{""state"":""COMPLETED"",""joints"":[");
         SocketSend client_socket \Str:=(NumToStr(q1, 2) + "," + NumToStr(q2, 2) + "," + NumToStr(q3, 2) + ",");
         SocketSend client_socket \Str:=(NumToStr(q4, 2) + "," + NumToStr(q5, 2) + "," + NumToStr(q6, 2) + "]},""error"":null}\0A");
+        LogTx msg_id, "OK COMPLETED ciclo=" + NumToStr(cycle_counter, 0);
     ERROR
+        last_errno := ERRNO;
+        last_err_msg := "MOVE_JOINTS_ERRNO_" + NumToStr(last_errno, 0);
+        LogTP "ERR MoveAbsJ errno=" + NumToStr(last_errno, 0);
+        LogDiag "ERR";
         SendError msg_id, "FALLO_EJECUCION_MOVIMIENTO";
         RETURN;
     ENDPROC
@@ -291,38 +404,70 @@ MODULE IRC5_TcpServer
             RETURN;
         ENDIF
 
+        LogJoints "EXE Preset " + preset_name + " v100 ", target_jt;
         MoveAbsJ target_jt, v100, fine, tool0;
         cycle_counter := cycle_counter + 1;
 
         SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",");
         SocketSend client_socket \Str:=("""data"":{""state"":""COMPLETED"",""target"":""" + preset_name + """},""error"":null}\0A");
+        LogTx msg_id, "OK COMPLETED " + preset_name;
     ERROR
+        last_errno := ERRNO;
+        last_err_msg := "MOVE_PRESET_ERRNO_" + NumToStr(last_errno, 0);
+        LogTP "ERR Preset errno=" + NumToStr(last_errno, 0);
+        LogDiag "ERR";
         SendError msg_id, "FALLO_EJECUCION_PRESET";
         RETURN;
     ENDPROC
 
+    ! E/S digitales reales del controlador (EIO) mediante AliasIO + DInput/DOutput/SetDO
     LOCAL PROC HandleGetDI(string body, num msg_id)
-        IF Contains(body, "di_pieza_presente") OR Contains(body, "di_robot_listo") OR Contains(body, "di_pinza_abierta") OR Contains(body, "di1") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":1,""error"":null}\0A");
-        ELSEIF Contains(body, "di_ciclo_inicio") OR Contains(body, "di_parada_celda") OR Contains(body, "di_pinza_cerrada") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":0,""error"":null}\0A");
-        ELSE
-            SendError msg_id, "SENAL_DI_NO_CONFIGURADA";
+        VAR string sig_name := "";
+        VAR dionum val := 0;
+
+        sig_name := ExtractJsonStr(body, "name");
+        IF sig_name = "" THEN
+            SendError msg_id, "NOMBRE_SENAL_FALTANTE";
+            RETURN;
         ENDIF
+
+        AliasIO sig_name, sig_io_in;
+        val := DInput(sig_io_in);
+        SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(val, 0) + ",""error"":null}\0A");
+        LogTx msg_id, "OK DI " + sig_name + "=" + NumToStr(val, 0);
+    ERROR
+        SendError msg_id, "SENAL_DI_NO_CONFIGURADA";
+        RETURN;
     ENDPROC
 
     LOCAL PROC HandleGetDO(string body, num msg_id)
-        IF Contains(body, "do_indicador_verde") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":1,""error"":null}\0A");
-        ELSEIF Contains(body, "do_valvula_aire") OR Contains(body, "do_pinza_actuar") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":0,""error"":null}\0A");
-        ELSE
-            SendError msg_id, "SENAL_DO_NO_CONFIGURADA";
+        VAR string sig_name := "";
+        VAR dionum val := 0;
+
+        sig_name := ExtractJsonStr(body, "name");
+        IF sig_name = "" THEN
+            SendError msg_id, "NOMBRE_SENAL_FALTANTE";
+            RETURN;
         ENDIF
+
+        AliasIO sig_name, sig_io_out;
+        val := DOutput(sig_io_out);
+        SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(val, 0) + ",""error"":null}\0A");
+        LogTx msg_id, "OK DO " + sig_name + "=" + NumToStr(val, 0);
+    ERROR
+        SendError msg_id, "SENAL_DO_NO_CONFIGURADA";
+        RETURN;
     ENDPROC
 
     LOCAL PROC HandleSetDO(string body, num msg_id)
-        VAR num val := 0;
+        VAR string sig_name := "";
+        VAR dionum val := 0;
+
+        sig_name := ExtractJsonStr(body, "name");
+        IF sig_name = "" THEN
+            SendError msg_id, "NOMBRE_SENAL_FALTANTE";
+            RETURN;
+        ENDIF
 
         IF Contains(body, """value"":1") THEN
             val := 1;
@@ -333,18 +478,30 @@ MODULE IRC5_TcpServer
             RETURN;
         ENDIF
 
-        IF Contains(body, "do_") OR Contains(body, "do1") OR Contains(body, "do2") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(val, 0) + ",""error"":null}\0A");
-        ELSE
-            SendError msg_id, "SALIDA_NO_AUTORIZADA";
-        ENDIF
+        AliasIO sig_name, sig_io_out;
+        SetDO sig_io_out, val;
+        SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(val, 0) + ",""error"":null}\0A");
+        LogTx msg_id, "OK SET_DO " + sig_name + "=" + NumToStr(val, 0);
+    ERROR
+        last_errno := ERRNO;
+        last_err_msg := "SET_DO_" + NumToStr(last_errno, 0);
+        SendError msg_id, "SALIDA_NO_CONFIGURADA";
+        RETURN;
     ENDPROC
 
     LOCAL PROC HandleGetVar(string body, num msg_id)
+        VAR num ovr := 100;
+
         IF Contains(body, "cycle_counter") OR Contains(body, "cycle_count") THEN
             SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(cycle_counter, 0) + ",""error"":null}\0A");
-        ELSEIF Contains(body, "current_speed") OR Contains(body, "speed_override") THEN
+            LogTx msg_id, "OK cycle_counter=" + NumToStr(cycle_counter, 0);
+        ELSEIF Contains(body, "speed_override") THEN
+            ovr := CSpeedOverride();
+            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(ovr, 0) + ",""error"":null}\0A");
+            LogTx msg_id, "OK speed_override=" + NumToStr(ovr, 0);
+        ELSEIF Contains(body, "current_speed") THEN
             SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(current_speed, 0) + ",""error"":null}\0A");
+            LogTx msg_id, "OK current_speed=" + NumToStr(current_speed, 0);
         ELSE
             SendError msg_id, "VARIABLE_NO_ENCONTRADA";
         ENDIF
@@ -353,13 +510,149 @@ MODULE IRC5_TcpServer
     LOCAL PROC SendError(num msg_id, string err_desc)
         SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""ERROR"",""data"":null,");
         SocketSend client_socket \Str:=("""error"":""" + err_desc + """}\0A");
+        LogTx msg_id, "ERROR " + err_desc;
     ENDPROC
+
+    ! ---------------- Bitacora (FlexPendant + Salida RobotStudio) ----------------
+
+    LOCAL PROC LogTP(string s)
+        VAR string msg;
+        VAR string hdr;
+
+        IF NOT LOG_TP RETURN;
+        msg := s;
+        IF StrLen(msg) > 80 THEN
+            msg := StrPart(msg, 1, 80);
+        ENDIF
+        hdr := msg;
+        IF StrLen(hdr) > 40 THEN
+            hdr := StrPart(hdr, 1, 40);
+        ENDIF
+        TPWrite msg;
+        ErrWrite \I, hdr, msg;
+    ENDPROC
+
+    LOCAL PROC LogTx(num msg_id, string body_txt)
+        VAR string prefix;
+        VAR string clean;
+        VAR num room;
+
+        IF NOT LOG_TP RETURN;
+        prefix := "TX#" + NumToStr(msg_id, 0) + " ";
+        clean := body_txt;
+        room := 80 - StrLen(prefix);
+        IF StrLen(clean) > room THEN
+            clean := StrPart(clean, 1, room);
+        ENDIF
+        LogTP prefix + clean;
+    ENDPROC
+
+    ! Registra modo de operacion (auto/T1/T2), motores, velocidad % del FlexPendant y modo de ciclo
+    LOCAL PROC LogDiag(string tag)
+        VAR string r := "cont";
+        VAR num ovr := 100;
+
+        IF NOT LOG_TP RETURN;
+        IF RunMode() <> RUN_CONT_CYCLE THEN
+            r := "paso";
+        ENDIF
+        ovr := CSpeedOverride();
+        LogTP tag + " " + OpModeTxt() + " mot=" + MotorState() + " vel=" + NumToStr(ovr, 0) + "% " + r;
+    ENDPROC
+
+    ! Muestra la trama cruda recibida: "RX#12 {"id":12,"cmd":"PING","params":{}}"
+    ! Concatenar mas de 80 caracteres en RAPID da error, por eso se recorta ANTES de unir
+    LOCAL PROC LogRx(string hdr, num n_bytes)
+        VAR string prefix;
+        VAR string clean;
+        VAR num room;
+
+        IF NOT LOG_TP RETURN;
+        prefix := "RX#" + NumToStr(rx_count, 0) + " ";
+        clean := CleanLine(hdr);
+        room := 80 - StrLen(prefix);
+        IF StrLen(clean) > room THEN
+            clean := StrPart(clean, 1, room);
+        ENDIF
+        LogTP prefix + clean;
+        IF n_bytes > 80 THEN
+            LogTP "  (trama de " + NumToStr(n_bytes, 0) + " bytes, se muestran 80)";
+        ENDIF
+    ENDPROC
+
+    LOCAL PROC LogJoints(string prefix, jointtarget jt)
+        VAR string s;
+
+        IF NOT LOG_TP RETURN;
+        s := "[" + NumToStr(jt.robax.rax_1, 1) + "," + NumToStr(jt.robax.rax_2, 1) + "," + NumToStr(jt.robax.rax_3, 1);
+        s := s + "," + NumToStr(jt.robax.rax_4, 1) + "," + NumToStr(jt.robax.rax_5, 1) + "," + NumToStr(jt.robax.rax_6, 1) + "]";
+        IF StrLen(prefix) + StrLen(s) > 80 THEN
+            LogTP prefix;
+            LogTP "  " + s;
+        ELSE
+            LogTP prefix + s;
+        ENDIF
+    ENDPROC
+
+    ! Quita el salto de linea final (\0A / \0D) para que se vea limpio en pantalla
+    LOCAL FUNC string CleanLine(string s)
+        VAR string r;
+        VAR num p;
+
+        r := s;
+        p := StrMatch(r, 1, "\0A");
+        IF p <= StrLen(r) THEN
+            IF p > 1 THEN
+                r := StrPart(r, 1, p - 1);
+            ELSE
+                r := "";
+            ENDIF
+        ENDIF
+        p := StrMatch(r, 1, "\0D");
+        IF p <= StrLen(r) THEN
+            IF p > 1 THEN
+                r := StrPart(r, 1, p - 1);
+            ELSE
+                r := "";
+            ENDIF
+        ENDIF
+        RETURN r;
+    ENDFUNC
+
+    ! ---------------- Utilidades de parseo ----------------
 
     LOCAL FUNC bool Contains(string s, string pat)
         IF StrLen(s) = 0 OR StrLen(pat) = 0 OR StrLen(pat) > StrLen(s) THEN
             RETURN FALSE;
         ENDIF
         RETURN StrMatch(s, 1, pat) <= StrLen(s);
+    ENDFUNC
+
+    ! Extrae el valor string de un campo JSON tipo "key":"valor"
+    LOCAL FUNC string ExtractJsonStr(string s, string key)
+        VAR string pat;
+        VAR string res := "";
+        VAR string c := "";
+        VAR num p := 0;
+        VAR num i := 0;
+
+        pat := """" + key + """:""";
+        p := StrMatch(s, 1, pat);
+        IF p > StrLen(s) THEN
+            RETURN "";
+        ENDIF
+
+        i := p + StrLen(pat);
+        WHILE i <= StrLen(s) DO
+            c := StrPart(s, i, 1);
+            IF c = """" THEN
+                i := StrLen(s) + 1;
+            ELSE
+                res := res + c;
+            ENDIF
+            i := i + 1;
+        ENDWHILE
+        RETURN res;
     ENDFUNC
 
     LOCAL FUNC num NextComma(string s, num idx)

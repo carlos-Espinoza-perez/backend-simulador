@@ -13,6 +13,9 @@ MODULE IRC5_TcpServer
     ! Senal para leer el estado de motores. En el IRC5 se configura como System Output "Motor On"
     ! (EIO > System Output). Si no existe, el modulo carga igual y se reporta "unknown".
     LOCAL VAR signaldo sig_motor_on;
+    ! En RAPID los tipos signaldi/signaldo son non-value y deben declararse a nivel de MODULE
+    LOCAL VAR signaldi sig_io_in;
+    LOCAL VAR signaldo sig_io_out;
     ! 0 = sin intentar, 1 = senal enlazada, -1 = la senal no existe en el EIO
     LOCAL VAR num motor_alias := 0;
     CONST string MOTOR_ON_SIGNAL := "do_motor_on";
@@ -417,36 +420,54 @@ MODULE IRC5_TcpServer
         RETURN;
     ENDPROC
 
-    ! NOTA: GET_DI / GET_DO / SET_DO aun responden valores fijos (no tocan senales reales del EIO)
+    ! E/S digitales reales del controlador (EIO) mediante AliasIO + DInput/DOutput/SetDO
     LOCAL PROC HandleGetDI(string body, num msg_id)
-        IF Contains(body, "di_pieza_presente") OR Contains(body, "di_robot_listo") OR Contains(body, "di_pinza_abierta") OR Contains(body, "di1") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":1,""error"":null}\0A");
-            LogTP "  >> OK DI=1 (simulado)";
-        ELSEIF Contains(body, "di_sensor_inductivo") OR Contains(body, "di_sensor_capacitivo") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":0,""error"":null}\0A");
-            LogTP "  >> OK DI=0 (simulado)";
-        ELSEIF Contains(body, "di_ciclo_inicio") OR Contains(body, "di_parada_celda") OR Contains(body, "di_pinza_cerrada") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":0,""error"":null}\0A");
-            LogTP "  >> OK DI=0 (simulado)";
-        ELSE
-            SendError msg_id, "SENAL_DI_NO_CONFIGURADA";
+        VAR string sig_name := "";
+        VAR dionum val := 0;
+
+        sig_name := ExtractJsonStr(body, "name");
+        IF sig_name = "" THEN
+            SendError msg_id, "NOMBRE_SENAL_FALTANTE";
+            RETURN;
         ENDIF
+
+        AliasIO sig_name, sig_io_in;
+        val := DInput(sig_io_in);
+        SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(val, 0) + ",""error"":null}\0A");
+        LogTx msg_id, "OK DI " + sig_name + "=" + NumToStr(val, 0);
+    ERROR
+        SendError msg_id, "SENAL_DI_NO_CONFIGURADA";
+        RETURN;
     ENDPROC
 
     LOCAL PROC HandleGetDO(string body, num msg_id)
-        IF Contains(body, "do_indicador_verde") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":1,""error"":null}\0A");
-            LogTP "  >> OK DO=1 (simulado)";
-        ELSEIF Contains(body, "do_valvula_aire") OR Contains(body, "do_pinza_actuar") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":0,""error"":null}\0A");
-            LogTP "  >> OK DO=0 (simulado)";
-        ELSE
-            SendError msg_id, "SENAL_DO_NO_CONFIGURADA";
+        VAR string sig_name := "";
+        VAR dionum val := 0;
+
+        sig_name := ExtractJsonStr(body, "name");
+        IF sig_name = "" THEN
+            SendError msg_id, "NOMBRE_SENAL_FALTANTE";
+            RETURN;
         ENDIF
+
+        AliasIO sig_name, sig_io_out;
+        val := DOutput(sig_io_out);
+        SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(val, 0) + ",""error"":null}\0A");
+        LogTx msg_id, "OK DO " + sig_name + "=" + NumToStr(val, 0);
+    ERROR
+        SendError msg_id, "SENAL_DO_NO_CONFIGURADA";
+        RETURN;
     ENDPROC
 
     LOCAL PROC HandleSetDO(string body, num msg_id)
-        VAR num val := 0;
+        VAR string sig_name := "";
+        VAR dionum val := 0;
+
+        sig_name := ExtractJsonStr(body, "name");
+        IF sig_name = "" THEN
+            SendError msg_id, "NOMBRE_SENAL_FALTANTE";
+            RETURN;
+        ENDIF
 
         IF Contains(body, """value"":1") THEN
             val := 1;
@@ -457,28 +478,36 @@ MODULE IRC5_TcpServer
             RETURN;
         ENDIF
 
-        IF Contains(body, "do_") OR Contains(body, "do1") OR Contains(body, "do2") THEN
-            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(val, 0) + ",""error"":null}\0A");
-            LogTP "  >> OK SET_DO=" + NumToStr(val, 0) + " (simulado)";
-        ELSE
-            SendError msg_id, "SALIDA_NO_AUTORIZADA";
-        ENDIF
+        AliasIO sig_name, sig_io_out;
+        SetDO sig_io_out, val;
+        SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(val, 0) + ",""error"":null}\0A");
+        LogTx msg_id, "OK SET_DO " + sig_name + "=" + NumToStr(val, 0);
+    ERROR
+        last_errno := ERRNO;
+        last_err_msg := "SET_DO_" + NumToStr(last_errno, 0);
+        SendError msg_id, "SALIDA_NO_CONFIGURADA";
+        RETURN;
     ENDPROC
 
     LOCAL PROC HandleGetVar(string body, num msg_id)
+        VAR num ovr := 100;
+
         IF Contains(body, "cycle_counter") OR Contains(body, "cycle_count") THEN
             SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(cycle_counter, 0) + ",""error"":null}\0A");
-            LogTP "  >> OK cycle_counter=" + NumToStr(cycle_counter, 0);
-        ELSEIF Contains(body, "current_speed") OR Contains(body, "speed_override") THEN
+            LogTx msg_id, "OK cycle_counter=" + NumToStr(cycle_counter, 0);
+        ELSEIF Contains(body, "speed_override") THEN
+            ovr := CSpeedOverride();
+            SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(ovr, 0) + ",""error"":null}\0A");
+            LogTx msg_id, "OK speed_override=" + NumToStr(ovr, 0);
+        ELSEIF Contains(body, "current_speed") THEN
             SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""OK"",""data"":" + NumToStr(current_speed, 0) + ",""error"":null}\0A");
-            LogTP "  >> OK current_speed=" + NumToStr(current_speed, 0);
+            LogTx msg_id, "OK current_speed=" + NumToStr(current_speed, 0);
         ELSE
             SendError msg_id, "VARIABLE_NO_ENCONTRADA";
         ENDIF
     ENDPROC
 
     LOCAL PROC SendError(num msg_id, string err_desc)
-        last_err_msg := err_desc;
         SocketSend client_socket \Str:=("{""id"":" + NumToStr(msg_id, 0) + ",""status"":""ERROR"",""data"":null,");
         SocketSend client_socket \Str:=("""error"":""" + err_desc + """}\0A");
         LogTx msg_id, "ERROR " + err_desc;
@@ -597,6 +626,33 @@ MODULE IRC5_TcpServer
             RETURN FALSE;
         ENDIF
         RETURN StrMatch(s, 1, pat) <= StrLen(s);
+    ENDFUNC
+
+    ! Extrae el valor string de un campo JSON tipo "key":"valor"
+    LOCAL FUNC string ExtractJsonStr(string s, string key)
+        VAR string pat;
+        VAR string res := "";
+        VAR string c := "";
+        VAR num p := 0;
+        VAR num i := 0;
+
+        pat := """" + key + """:""";
+        p := StrMatch(s, 1, pat);
+        IF p > StrLen(s) THEN
+            RETURN "";
+        ENDIF
+
+        i := p + StrLen(pat);
+        WHILE i <= StrLen(s) DO
+            c := StrPart(s, i, 1);
+            IF c = """" THEN
+                i := StrLen(s) + 1;
+            ELSE
+                res := res + c;
+            ENDIF
+            i := i + 1;
+        ENDWHILE
+        RETURN res;
     ENDFUNC
 
     LOCAL FUNC num NextComma(string s, num idx)

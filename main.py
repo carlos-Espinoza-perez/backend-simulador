@@ -1300,6 +1300,17 @@ def execute_rapid_stream(data):
                 sig = movement.get('signal', '')
                 val = int(movement.get('value', 1 if m_type == 'SetDO' else 0))
                 emit('rapid_console', {"message": f"{m_type} {sig} := {val}", "type": "info"})
+                cli = get_shared_robot_client()
+                if cli is not None and cli.is_connected():
+                    try:
+                        log_robot_event("OUT", {"cmd": "SET_DO", "name": sig, "value": val})
+                        r_do = cli.set_do(sig, val, physical_confirmed=True)
+                        log_robot_event("IN", {"cmd": "SET_DO", "name": sig, **r_do}, latency_ms=r_do.get("latency_ms"))
+                        if not r_do.get("success"):
+                            emit('rapid_console', {"message": f"❌ SetDO {sig}: {r_do.get('error')}", "type": "error"})
+                    except Exception as do_err:
+                        log_robot_event("IN", {"cmd": "SET_DO", "name": sig, "success": False, "error": str(do_err)})
+                        emit('rapid_console', {"message": f"❌ SetDO {sig}: {do_err}", "type": "error"})
                 try:
                     from robot_connection.virtual_io_manager import VirtualIOManager
                     VirtualIOManager().update_signal_value(sig, val)
